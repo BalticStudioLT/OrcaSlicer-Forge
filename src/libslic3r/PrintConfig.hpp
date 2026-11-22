@@ -1368,6 +1368,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               support_ironing_spacing))
     ((ConfigOptionFloat,               xy_hole_compensation))
     ((ConfigOptionFloat,               xy_contour_compensation))
+    // Nonplanar top shells (ported from PrusaSlicer Nonplanar).
+    ((ConfigOptionBool,                use_nonplanar_layers))
+    ((ConfigOptionFloat,               nonplanar_layers_angle))
+    ((ConfigOptionFloat,               nonplanar_layers_height))
+    ((ConfigOptionBool,                set_nonplanar_top_surface_flow_ratio))
+    ((ConfigOptionFloat,               nonplanar_top_surface_flow_ratio))
+    ((ConfigOptionBool,                set_nonplanar_top_surface_direction))
+    ((ConfigOptionFloat,               nonplanar_top_surface_direction))
     ((ConfigOptionBool,                flush_into_objects))
     // BBS
     ((ConfigOptionBool,                flush_into_infill))
@@ -2149,6 +2157,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionEnum<TimelapseType>,    timelapse_type))
     // Corexy farthest-point timelapse (default false → inert for existing printers)
     ((ConfigOptionBool,               farthest_point_timelapse))
+    ((ConfigOptionBool,               timelapse_enabled))
     ((ConfigOptionString,             thumbnails))
     // BBS: move from PrintObjectConfig
     ((ConfigOptionBool, independent_support_layer_height))

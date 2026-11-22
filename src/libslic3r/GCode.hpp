@@ -9,6 +9,7 @@
 #include "GCodeWriter.hpp"
 #include "GCode/BeltKinematics.hpp"
 #include "Layer.hpp"
+#include "NonplanarSchedule.hpp"
 #include "Point.hpp"
 #include "PlaceholderParser.hpp"
 #include "PrintConfig.hpp"
@@ -310,6 +311,9 @@ public:
     void            apply_print_config(const PrintConfig &print_config);
 
     std::string     travel_to(const Point& point, ExtrusionRole role, std::string comment, double z = DBL_MAX);
+    // Nonplanar (ported from PrusaSlicer Nonplanar): a travel to another height
+    // or beside conformal material is a lift, a horizontal travel and a descent.
+    bool            needs_zmove(const Polyline &travel, double target_z);
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, bool apply_instantly = false, ExtrusionRole role = erNone);
     // extra_retract forwards a PETG pre-extrusion over-extrusion; default 0 -> identical to the plain deretract.
@@ -881,6 +885,56 @@ protected:
     std::optional<ToolchangePositionState> capture_toolchange_position();
     void synchronize_toolchange_position(const ToolchangePositionState &before,
                                          const std::string             &emitted_gcode);
+    // ---- Nonplanar top shells (ported from PrusaSlicer Nonplanar) ----
+    // Deposited heights for the lift of nonplanar travels (only as high as
+    // the measured hotend needs above the material along the travel).
+    NonplanarHeightMap                  m_nonplanar_heights;
+    // Deferred material is emitted beside material printed after its own
+    // layer; a wipe along it is a travel the deposition plan never checked.
+    bool                                m_emitting_deferred{ false };
+    NonplanarClearanceModel             m_nonplanar_clearance;
+    bool                                m_nonplanar_printed_this_layer{ false };
+    // Path provenance IDs come from a global counter incremented during
+    // parallel generation.  Emit them renumbered in output order, so equal
+    // inputs give equal PATH_TASK IDs regardless of thread scheduling.
+    std::unordered_map<size_t, size_t>  m_path_task_ids;
+    // Cross-layer deposition order of conformal shells, per object.  Planar
+    // material that would obstruct a conformal shell is emitted as a whole
+    // unit at its own height at the end of a later layer (NonplanarSchedule.hpp).
+    struct DeferredExtrusion {
+        int                                     slot;
+        int                                     base;
+        double                                  z;
+        size_t                                  source_layer;
+        double                                  source_layer_z;
+        // Whole unit (loop with its seam already placed, multi path or path).
+        std::shared_ptr<ExtrusionEntity>        entity;
+        std::string                             description;
+        double                                  speed;
+        const PrintRegion                      *region;
+        unsigned int                            extruder;
+    };
+    std::map<const PrintObject*, NonplanarDeferral>                              m_nonplanar_deferral;
+    std::map<std::pair<const PrintObject*, size_t>, std::vector<DeferredExtrusion>> m_deferred_extrusions;
+    const NonplanarDeferral            *m_deferral_plan { nullptr };
+    std::pair<const PrintObject*, size_t> m_deferral_key { nullptr, 0 };
+    size_t                              m_deferral_layer_id { 0 };
+    const PrintRegion                  *m_current_region { nullptr };
+    // Travels to, between and away from deferred material are lifted above
+    // all deposited material and descend vertically; the plan only checks
+    // the deposited positions, not a low straight travel between them.
+    bool                                m_force_safe_travel { false };
+    bool                                m_force_safe_travel_once { false };
+    // Set while a deferred loop is emitted: its seam was placed in its own layer.
+    bool                                m_loop_seam_placed { false };
+    // Queue the whole entity if the plan moves it to a later slot.
+    bool                                defer_planar_material(const ExtrusionEntity &entity, const std::string &description,
+                                                              double speed, std::string &gcode);
+    // Queue the conformal material that the plan emits before its home layer.
+    void                                queue_advanced_conformal(const Print &print);
+    std::string                         emit_deferred_material(int slot, unsigned int extruder_id);
+    // Emit the deferred slots that belong after this object layer.
+    std::string                         emit_deferred_after_layer(const PrintObject &print_object, unsigned int extruder_id);
 
     std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
     std::unique_ptr<SpiralVase>         m_spiral_vase;

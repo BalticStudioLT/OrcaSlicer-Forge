@@ -1229,6 +1229,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     bool have_avoid_crossing_perimeters = config->opt_bool("reduce_crossing_wall");
     toggle_line("max_travel_detour_distance", have_avoid_crossing_perimeters, -1, _L("Enable avoiding crossing walls to edit the maximum travel detour distance."));
 
+    toggle_line("nonplanar_top_surface_flow_ratio", config->opt_bool("set_nonplanar_top_surface_flow_ratio"));
+    toggle_line("nonplanar_top_surface_direction", config->opt_bool("set_nonplanar_top_surface_direction"));
+
     bool has_set_other_flow_ratios = config->opt_bool("set_other_flow_ratios");
     for (auto el : {"first_layer_flow_ratio", "outer_wall_flow_ratio", "inner_wall_flow_ratio", "overhang_flow_ratio", "sparse_infill_flow_ratio", "internal_solid_infill_flow_ratio", "gap_fill_flow_ratio", "support_flow_ratio", "support_interface_flow_ratio"})
         toggle_line(el, has_set_other_flow_ratios, -1, _L("Enable setting other flow ratios to use this setting."));

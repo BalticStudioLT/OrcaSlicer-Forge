@@ -19,6 +19,8 @@
 namespace Slic3r { class ExtrusionLoop; }
 namespace Slic3r { class ExtrusionMultiPath; }
 namespace Slic3r { class ExtrusionPath; }
+#include "NonplanarSurface.hpp"
+#include "BoundingBox.hpp"
 namespace Slic3r {
 
 class ExPolygon;
@@ -43,6 +45,9 @@ namespace FillLightning {
 namespace sla {
     class IndexedMesh;
 };
+
+class NonplanarProjectionIndex;
+class PrintRegionConfig;
 
 class LayerRegion
 {
@@ -97,6 +102,26 @@ public:
     void    prepare_fill_surfaces();
     //BBS
     void    make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap);
+    // One perimeter generator run; config_override and planar_neighbours serve nonplanar shells.
+    void    make_perimeters_generator(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap,
+                                      const PrintRegionConfig *config_override, bool planar_neighbours);
+
+    // Nonplanar target surfaces homed in this layer (ported from PrusaSlicer Nonplanar).
+    const NonplanarSurfaces& nonplanar_surfaces() const { return m_nonplanar_surfaces; }
+    // Append a new nonplanar surface to the list, skip if already in the list.
+    void    append_nonplanar_surface(NonplanarSurface& surface);
+    // Projects the paths of a collection onto their target surfaces.
+    void    project_nonplanar_extrusion(ExtrusionEntityCollection* collection, const NonplanarProjectionIndex& index);
+    // Projects the conformal perimeters and fills of this region onto their target surfaces.
+    void    project_nonplanar_surfaces();
+    // Projects one nonplanar path.
+    std::vector<ExtrusionPath> project_nonplanar_path(const ExtrusionPath& path, const NonplanarProjectionIndex& index);
+    void    remove_nonplanar_slices(SurfaceCollection topNonplanar);
+    // Forget homed target surfaces before a new detection pass.
+    void    clear_nonplanar_surfaces();
+    // Merge slices belonging to the same target surface and shell.
+    void    merge_nonplanar_shell_slices();
+    void    append_top_nonplanar_slices(SurfaceCollection topNonplanar);
     void    process_external_surfaces(const Layer *lower_layer, const Polygons *lower_layer_covered);
     double  infill_area_threshold() const;
     // Trim surfaces by trimming polygons. Used by the elephant foot compensation at the 1st layer.
@@ -132,6 +157,10 @@ protected:
 private:
     Layer             *m_layer;
     const PrintRegion *m_region;
+
+    NonplanarSurfaces  m_nonplanar_surfaces;
+    // Perimeters survive an infill-only invalidation; project them once.
+    bool               m_nonplanar_perimeters_projected { false };
 };
 
 class Layer
@@ -174,6 +203,12 @@ public:
     // island, the 3D connected body (across all layers) it belongs to, indexing
     // PrintObject::separated_body_bboxes(). Populated by PrintObject::prepare_infill() only when needed.
     std::vector<size_t>      lslices_separated_component_ids;
+    // Nonplanar: the layer's object geometry before conformal shell strips were
+    // moved to their home layers (PrintObject::detect_nonplanar_surfaces), per
+    // region and merged.  Support generation works on it, so that it sees the
+    // real object.  Empty if no strips were moved.
+    std::vector<ExPolygons>  region_slices_before_nonplanar;
+    ExPolygons               lslices_before_nonplanar;
 
     // BBS
     ExPolygons              loverhangs;

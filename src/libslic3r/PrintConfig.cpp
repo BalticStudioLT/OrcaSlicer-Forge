@@ -5255,6 +5255,74 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comExpert;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("use_nonplanar_layers", coBool);
+    def->label = L("Use nonplanar layers");
+    def->category = L("Quality");
+    def->tooltip = L("Generate nonplanar layers on top of the object. Top surfaces of the object are then printed at 50 mm/s at most.");
+    def->mode = comAdvanced;
+    // Nonplanar build: on by default with the A1 mini limits below (user decision 2026-10-23).
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("nonplanar_layers_angle", coFloat);
+    def->label = L("Maximum nonplanar angle");
+    def->category = L("Quality");
+    def->tooltip = L("The maximum angle the printer can print without collisions.");
+    def->sidetext = u8"°";	// degrees, don't need translation
+    def->min = 0;
+    // Upper limit of the tested hotend (user decision 2026-10-29).
+    def->max = 12;
+    def->mode = comAdvanced;
+    // Bambu Lab A1 mini print test: 12 degrees (15 degrees rubs, 2026-10-23).
+    def->set_default_value(new ConfigOptionFloat(12.0));
+
+    def = this->add("nonplanar_layers_height", coFloat);
+    def->label = L("Maximum nonplanar height");
+    def->category = L("Quality");
+    def->tooltip = L("The maximum height the printer can print without collisions.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    // Upper limit of the tested hotend (user decision 2026-10-29).
+    def->max = 5;
+    def->mode = comAdvanced;
+    // Bambu Lab A1 mini: 5 mm height span.
+    def->set_default_value(new ConfigOptionFloat(5.0));
+
+    def = this->add("set_nonplanar_top_surface_flow_ratio", coBool);
+    def->label = L("Set nonplanar top surface flow ratio");
+    def->category = L("Quality");
+    def->tooltip = L("Use a separate flow ratio for the top surface lines of the nonplanar top shell. "
+                     "Planar top surfaces keep the top surface flow ratio.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("set_nonplanar_top_surface_direction", coBool);
+    def->label = L("Set nonplanar top surface direction");
+    def->category = L("Quality");
+    def->tooltip = L("Use a fixed line direction for the nonplanar top shell instead of the solid infill direction. "
+                     "The nonplanar shells below it alternate by 90 degrees.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("nonplanar_top_surface_direction", coFloat);
+    def->label = L("Nonplanar top surface direction");
+    def->category = L("Quality");
+    def->tooltip = L("Line direction of the nonplanar top shell, in the same convention as the solid infill direction.");
+    def->sidetext = u8"°";	// degrees, don't need translation
+    def->min = 0;
+    def->max = 360;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(45));
+
+    def = this->add("nonplanar_top_surface_flow_ratio", coFloat);
+    def->label = L("Nonplanar top surface flow ratio");
+    def->category = L("Quality");
+    def->tooltip = L("Flow ratio of the top surface lines of the nonplanar top shell, used instead of the top surface flow ratio. "
+                     "The actual flow is calculated by multiplying this value with the filament flow ratio, and if set, the object's flow ratio.");
+    def->min = 0;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1));
+
     def = this->add("zaa_enabled", coBool);
     def->label    = L("Z contouring enabled");
     def->category = L("Quality");
@@ -6924,6 +6992,13 @@ void PrintConfigDef::init_fff_params()
     def->max = 1;
     def->set_default_value(new ConfigOptionFloat(0));
     def->mode = comAdvanced;
+
+    def = this->add("timelapse_enabled", coBool);
+    def->label = L("Enable timelapse");
+    def->tooltip = L("Insert the printer's timelapse G-code (snapshot moves) after each layer. "
+                     "Never inserted for objects with nonplanar layers.");
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("timelapse_type", coEnum);
     def->label = L("Timelapse");

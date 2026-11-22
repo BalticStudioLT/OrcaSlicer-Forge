@@ -41,6 +41,7 @@
 #include "Slicing.hpp"
 #include "Surface.hpp"
 #include "Utils.hpp"
+#include "AABBMesh.hpp"
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
 #include "Config.hpp"
 #include "SurfaceCollection.hpp"
@@ -925,6 +926,8 @@ void PrintObject::slice()
         m_slicing_params.belt_floor_z_shift = z_shift_val;
     }
 
+    this->find_nonplanar_surfaces();
+    m_print->throw_if_canceled();
     int firstLayerReplacedBy = 0;
 
 #if 0
@@ -1064,6 +1067,144 @@ void PrintObject::slice()
 
     // BBS
     this->set_done(posSlice);
+}
+
+void
+PrintObject::find_nonplanar_surfaces()
+{
+    //skip if not active
+    if(!m_config.use_nonplanar_layers.value) {
+        BOOST_LOG_TRIVIAL(debug) << "Find nonplanar surfaces - disabled";
+        return;
+    }
+    // Z contouring (anti-aliasing) and nonplanar shells both set the height of
+    // extrusions; they are mutually exclusive.
+    for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id)
+        if (this->printing_region(region_id).config().zaa_enabled.value)
+            throw Slic3r::SlicingError(_u8L("Nonplanar layers and Z contouring cannot be used together. "
+                                            "Disable one of them for this object."));
+
+    BOOST_LOG_TRIVIAL(info) << "Find nonplanar surfaces - start";
+
+    // Target surfaces of all volumes of this object.  Each volume used to
+    // overwrite the list of the previous one.
+    m_nonplanar_surfaces.clear();
+
+    //Itterate over all model volumes
+    const ModelVolumePtrs volumes = this->model_object()->volumes;
+    for (ModelVolumePtrs::const_iterator it = volumes.begin(); it != volumes.end(); ++ it) {
+        //only check non modifier volumes
+        if (! (*it)->is_modifier()) {
+            // Same geometry basis as slice_volume(): object trafo (centered in
+            // XY) times volume matrix.  The slice Z frame is the object frame,
+            // so no separate per-volume Z shift is applied.
+            TriangleMesh tmesh = (*it)->mesh();
+            tmesh.transform(this->trafo_centered() * (*it)->get_matrix(), true);
+            AABBMesh mesh(tmesh, true);
+            std::map<int, NonplanarFacet> facets;
+
+            // store all meshes with slope <= nonplanar_layers_angle in map. Map is necessary to keep facet ID
+            for (int face_id = 0; face_id < mesh.indices().size(); ++ face_id) {
+                auto &face = mesh.indices(face_id);
+                Vec3d normal = mesh.normal_by_face_id(face_id);
+
+                //TODO check if normals exist
+                if (normal.z() >= std::cos(m_config.nonplanar_layers_angle.value * 3.14159265/180.0)) {
+                    //copy facet
+                    NonplanarFacet new_facet;
+                    new_facet.normal.x = normal.x();
+                    new_facet.normal.y = normal.y();
+                    new_facet.normal.z = normal.z();
+
+                    Vec3i32 neighbor = mesh.face_neighbor_index()[face_id];
+                    its_triangle vertex = its_triangle_vertices(*mesh.get_triangle_mesh(), face_id);
+                    for (int j=0; j<=2 ;j++) {
+                        new_facet.vertex[j].x = vertex[j].x();
+                        new_facet.vertex[j].y = vertex[j].y();
+                        new_facet.vertex[j].z = vertex[j].z();
+                        new_facet.neighbor[j] = neighbor[j];
+                    }
+                    new_facet.calculate_stats();
+                    facets[face_id] = new_facet;
+                }
+            }
+
+            // create nonplanar surface from facets
+            NonplanarSurface nf = NonplanarSurface(facets);
+
+            // group surfaces of this volume; appended to the object below
+            NonplanarSurfaces volume_surfaces = nf.group_surfaces();
+
+#ifdef SLIC3R_DEBUG_SLICE_PROCESSING
+            for (size_t id = 0; id < volume_surfaces.size(); ++ id) {
+                auto& surface = volume_surfaces[id];
+                Surfaces surfaces;
+                surfaces_append(surfaces, surface.horizontal_projection(), SurfaceType::stTopNonplanar);
+                SurfaceCollection c(surfaces);
+                c.export_to_svg(debug_out_path("0_find_nonplanar_surface-%d-initial_layer%.2f.svg", id, surface.stats.min.z).c_str(), true);
+            }
+#endif
+
+            // check for surfaces that are actually flat
+            for (NonplanarSurfaces::iterator it = volume_surfaces.begin(); it!=volume_surfaces.end();) {
+                if((*it).stats.min.z == (*it).stats.max.z) {
+                    BOOST_LOG_TRIVIAL(trace) << "Find nonplanar surfaces - deleted one surface with same min/max Z height";
+                    it = volume_surfaces.erase(it);
+                } else {
+                    it++;
+                }
+            }
+
+            // check if surfaces maintain maximum printing height, if not, erase it
+            for (NonplanarSurfaces::iterator it = volume_surfaces.begin(); it!=volume_surfaces.end();) {
+                if((*it).check_max_printing_height(m_config.nonplanar_layers_height.value)) {
+                    BOOST_LOG_TRIVIAL(trace) << "Find nonplanar surfaces - deleted one surface due to max printing height constraint";
+                    it = volume_surfaces.erase(it);
+                }else {
+                    it++;
+                }
+            }
+
+            // check if surfaces area is not too small
+            for (NonplanarSurfaces::iterator it = volume_surfaces.begin(); it!=volume_surfaces.end();) {
+                if((*it).check_surface_area()) {
+                    BOOST_LOG_TRIVIAL(trace) << "Find nonplanar surfaces - deleted one surface due to print area too small";
+                    it = volume_surfaces.erase(it);
+                }else {
+                    it++;
+                }
+            }
+
+            // check if surfaces areas collide
+            for (NonplanarSurfaces::iterator it = volume_surfaces.begin(); it!=volume_surfaces.end();) {
+                if(check_nonplanar_collisions((*it))) {
+                    BOOST_LOG_TRIVIAL(trace) << "Find nonplanar surfaces - deleted one surface due to collision";
+                    it = volume_surfaces.erase(it);
+                } else {
+                    it++;
+                }
+            }
+
+            //nf.debug_output();
+
+            BOOST_LOG_TRIVIAL(info) << "Find nonplanar surfaces - found " << volume_surfaces.size() << " in " << (*it)->name;
+            m_nonplanar_surfaces.insert(m_nonplanar_surfaces.end(), volume_surfaces.begin(), volume_surfaces.end());
+
+            for (size_t id = 0; id < m_nonplanar_surfaces.size(); ++ id) {
+                auto& surface = m_nonplanar_surfaces[id];
+                BOOST_LOG_TRIVIAL(debug) << "Find nonplanar surfaces - surface" << id << " at Z [min=" << surface.stats.min.z << ", max=" << surface.stats.max.z << "]";
+
+#ifdef SLIC3R_DEBUG_SLICE_PROCESSING
+                Surfaces surfaces;
+                surfaces_append(surfaces, surface.horizontal_projection(), SurfaceType::stTopNonplanar);
+                SurfaceCollection c(surfaces);
+                c.export_to_svg(debug_out_path("0_find_nonplanar_surface-%d-final_layer%.2f.svg", id, surface.stats.min.z).c_str(), true);
+#endif
+            }
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "Find nonplanar surfaces - end";
 }
 
 template<typename ThrowOnCancel>

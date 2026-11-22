@@ -33,6 +33,7 @@
 #include "IMEXHelpers.hpp"
 #include "GCode.hpp"
 #include <cstdio>
+#include "Feature/FuzzySkin/FuzzySkin.hpp"
 #include "Exception.hpp"
 #include "LifecycleEvents.hpp"
 #include "ExtrusionEntity.hpp"
@@ -199,6 +200,180 @@ std::optional<Vec2d> emitted_xy_after_gcode(const std::string &gcode, const Vec2
 }
 
 } // namespace
+// ---- Nonplanar top shells (ported from PrusaSlicer Nonplanar) ----
+//
+// Nonplanar surfaces are moved into a shared nominal layer.  The ordinary
+// order is two-dimensional, so it may print a flat, higher part of the same
+// nominal layer before a conformal perimeter which needs to pass beside it.
+// Preserve normal ordering for purely planar work, but emit each conformal
+// shell from its lower supporting shell towards its visible shell before the
+// planar remainder.
+struct NonplanarEmissionKey {
+    bool  is_nonplanar = false;
+    float shell_offset = -std::numeric_limits<float>::infinity();
+};
+
+static void collect_nonplanar_emission_key(const ExtrusionEntity &entity, NonplanarEmissionKey &key)
+{
+    if (const auto *path = dynamic_cast<const ExtrusionPath*>(&entity)) {
+        if (path->nonplanar_source) {
+            key.is_nonplanar = true;
+            key.shell_offset = std::max(key.shell_offset, path->distance_to_top);
+        }
+    } else if (const auto *loop = dynamic_cast<const ExtrusionLoop*>(&entity)) {
+        for (const ExtrusionPath &path : loop->paths)
+            collect_nonplanar_emission_key(path, key);
+    } else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity)) {
+        for (const ExtrusionPath &path : multipath->paths)
+            collect_nonplanar_emission_key(path, key);
+    } else if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection*>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            collect_nonplanar_emission_key(*child, key);
+    }
+}
+
+static NonplanarEmissionKey nonplanar_emission_key(const ExtrusionEntity &entity)
+{
+    NonplanarEmissionKey key;
+    collect_nonplanar_emission_key(entity, key);
+    return key;
+}
+
+static bool nonplanar_before_planar(const ExtrusionEntity &left, const ExtrusionEntity &right)
+{
+    const NonplanarEmissionKey a = nonplanar_emission_key(left);
+    const NonplanarEmissionKey b = nonplanar_emission_key(right);
+    if (a.is_nonplanar != b.is_nonplanar)
+        return a.is_nonplanar;
+    // Larger distance-to-top is the lower (supporting) conformal shell.
+    if (a.is_nonplanar && std::abs(a.shell_offset - b.shell_offset) > EPSILON)
+        return a.shell_offset > b.shell_offset;
+    return false;
+}
+
+static bool same_nonplanar_emission_group(const ExtrusionEntity &left, const ExtrusionEntity &right)
+{
+    const NonplanarEmissionKey a = nonplanar_emission_key(left);
+    const NonplanarEmissionKey b = nonplanar_emission_key(right);
+    return a.is_nonplanar == b.is_nonplanar &&
+        (!a.is_nonplanar || std::abs(a.shell_offset - b.shell_offset) <= EPSILON);
+}
+
+static bool has_nonplanar_source(const ExtrusionEntity &entity)
+{
+    return nonplanar_emission_key(entity).is_nonplanar;
+}
+
+// A conformal path carries absolute projected heights in Point3::z; planar
+// material deferred to a later layer carries its own layer height there.
+// (Z anti-aliasing offsets are excluded: ZAA and nonplanar layers are exclusive.)
+static bool path_has_absolute_z(const ExtrusionPath &path)
+{
+    return path.nonplanar_source ||
+        (! path.z_contoured && ! path.polyline.points.empty() && path.polyline.points.front().z() > 0);
+}
+
+// Islands containing conformal paths get a deterministic order: supporting
+// shells first, then the visible shell, then planar islands.  This is an
+// island ordering, not a geometry filter.
+struct NonplanarIslandKey {
+    bool   has_nonplanar = false;
+    float  shell_offset  = -std::numeric_limits<float>::infinity();
+    size_t source_layer  = std::numeric_limits<size_t>::max();
+};
+
+static void collect_nonplanar_island_key(const ExtrusionEntity &entity, NonplanarIslandKey &key)
+{
+    if (const auto *path = dynamic_cast<const ExtrusionPath*>(&entity)) {
+        if (path->nonplanar_source) {
+            key.has_nonplanar = true;
+            key.shell_offset = std::max(key.shell_offset, path->distance_to_top);
+            key.source_layer = std::min(key.source_layer, path->source_layer_id);
+        }
+    } else if (const auto *loop = dynamic_cast<const ExtrusionLoop*>(&entity)) {
+        for (const ExtrusionPath &path : loop->paths)
+            collect_nonplanar_island_key(path, key);
+    } else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity)) {
+        for (const ExtrusionPath &path : multipath->paths)
+            collect_nonplanar_island_key(path, key);
+    } else if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection*>(&entity)) {
+        for (const ExtrusionEntity *child : collection->entities)
+            collect_nonplanar_island_key(*child, key);
+    }
+}
+
+static bool nonplanar_island_before(const NonplanarIslandKey &left, const NonplanarIslandKey &right)
+{
+    if (left.has_nonplanar != right.has_nonplanar)
+        return left.has_nonplanar;
+    if (!left.has_nonplanar)
+        return false;
+    // Larger distance-to-top is the lower supporting shell.  Source layer is
+    // only a deterministic tie breaker; it does not change the geometry.
+    if (std::abs(left.shell_offset - right.shell_offset) > EPSILON)
+        return left.shell_offset > right.shell_offset;
+    return left.source_layer < right.source_layer;
+}
+
+// XY arc length of a path (scaled), as measured by the deposition planner.
+static double polyline_length_scaled(const Polyline3 &polyline)
+{
+    double length = 0.;
+    for (size_t i = 1; i < polyline.points.size(); ++ i)
+        length += (polyline.points[i].to_point() - polyline.points[i-1].to_point()).cast<double>().norm();
+    return length;
+}
+
+// Sub-polyline between XY arc lengths a and b; Z is interpolated.
+static Polyline3 sub_polyline(const Polyline3 &source, double a, double b)
+{
+    Polyline3 out;
+    const Points3 &src = source.points;
+    double walked = 0.;
+    auto at = [](const Point3 &p, const Point3 &q, double t) {
+        const Vec2d xy = p.to_point().cast<double>() + t * (q.to_point() - p.to_point()).cast<double>();
+        return Point3(coord_t(std::round(xy.x())), coord_t(std::round(xy.y())),
+                      coord_t(std::round(double(p.z()) + t * double(q.z() - p.z()))));
+    };
+    for (size_t i = 1; i < src.size(); ++ i) {
+        const double len = (src[i].to_point() - src[i-1].to_point()).cast<double>().norm();
+        const double s0 = walked, s1 = walked + len;
+        walked = s1;
+        if (s1 < a || len <= 0.)
+            continue;
+        if (s0 > b)
+            break;
+        if (out.points.empty())
+            out.points.push_back(at(src[i-1], src[i], std::clamp((a - s0) / len, 0., 1.)));
+        if (s1 <= b) {
+            if (out.points.back() != src[i])
+                out.points.push_back(src[i]);
+        } else {
+            out.points.push_back(at(src[i-1], src[i], (b - s0) / len));
+            break;
+        }
+    }
+    return out;
+}
+
+// Slot intervals of a path piece in its emitted direction: (slot, a, b) with
+// arc lengths of the emitted polyline.  Slivers below 0.01 mm are dropped: a
+// piece of almost no length would still cause a travel and descent.
+static std::vector<std::tuple<int, double, double>> plan_pieces(const NonplanarDeferral::PathPlan &plan, bool reversed, double length)
+{
+    std::vector<std::tuple<int, double, double>> out;
+    const double scale = plan.length > 0. ? length / plan.length : 1.;
+    for (size_t k = 0; k < plan.breaks.size(); ++ k) {
+        const double a = plan.breaks[k].first * scale;
+        const double b = (k + 1 < plan.breaks.size() ? plan.breaks[k + 1].first : plan.length) * scale;
+        if (b - a <= scaled<double>(0.01))
+            continue;
+        out.emplace_back(plan.breaks[k].second, reversed ? length - b : a, reversed ? length - a : b);
+    }
+    if (reversed)
+        std::reverse(out.begin(), out.end());
+    return out;
+}
 
     //! macro used to mark string used at localization,
     //! return same string
@@ -3455,6 +3630,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     m_last_height  = 0.f;
     m_last_layer_z = 0.f;
     m_max_layer_z  = 0.f;
+    // Nonplanar deposition order per object.  NONPLANAR_DEPOSITION_ORDER=0
+    // disables the plan (diagnostics and regression comparison only; such an
+    // export is not checked).
+    m_path_task_ids.clear();
+    m_deferred_extrusions.clear();
+    m_nonplanar_deferral.clear();
+    m_nonplanar_heights.clear();
+    {
+        const char *order_switch = std::getenv("NONPLANAR_DEPOSITION_ORDER");
+        const bool  plan_order   = order_switch == nullptr || std::string(order_switch) != "0";
+        for (const PrintObject *object : print.objects())
+            if (plan_order && object->config().use_nonplanar_layers.value)
+                m_nonplanar_deferral.emplace(object, plan_nonplanar_deferral(*object, NonplanarClearanceModel()));
+        this->queue_advanced_conformal(print);
+    }
     m_last_width = 0.f;
     m_last_layer_accumulated_mass = 0.0;
     m_is_role_based_fan_on.fill(false);
@@ -4252,6 +4442,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         file.write_format("; HEADER_BLOCK_START\n");
         // Write information on the generator.
         file.write_format("; generated by %s on %s\n", Slic3r::header_slic3r_generated().c_str(), Slic3r::Utils::local_timestamp().c_str());
+        // Bambu Studio reads the CONFIG_BLOCK only from G-code it recognises by
+        // the name "BambuStudio" in a comment; without it its viewer crashes on
+        // the first T command (no nozzle group set up).
+        file.write("; BambuStudio G-code viewer: configuration in CONFIG_BLOCK below\n");
+        file.write_format("; OrcaSlicer Nonplanar %s (%s)\n", ORCA_NONPLANAR_VERSION, ORCA_NONPLANAR_URL);
         if (is_bbl_printers)
             file.write_format(";%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Estimated_Printing_Time_Placeholder).c_str());
         //BBS: total layer number
@@ -4828,6 +5023,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 file.write(m_wipe_tower->finalize(*this));
         }
     }
+    // Deferred material must have been emitted in its slot.  Anything left
+    // would be silently missing from the print.
+    for (const auto &[key, queue] : m_deferred_extrusions)
+        if (! queue.empty())
+            throw_nonplanar_internal("", std::to_string(queue.size()) + " moved extrusions were never written",
+                key.first != nullptr ? key.first->id().id : 0);
+
     //BBS: the last retraction
     // Write end commands to file.
     file.write(this->retract(false, true));
@@ -6515,6 +6717,14 @@ std::string GCode::generate_timelapse_gcode(const Print &print, coordf_t print_z
 {
     if (!m_writer.filament())
         return {};
+    if (! print.config().timelapse_enabled.value)
+        return {};
+    // Nonplanar prints: no timelapse moves.  Their travel to the parking
+    // position runs at the current layer height, which the nonplanar
+    // deposition plan does not check against conformal material.
+    for (const PrintObject *object : print.objects())
+        if (object->config().use_nonplanar_layers.value)
+            return {};
 
     std::string timelapse_gcode;
     if (!print.config().time_lapse_gcode.value.empty()) {
@@ -7681,6 +7891,16 @@ LayerResult GCode::process_layer(
                 // checking anything here.
                 m_extrusion_quality_estimator.set_current_object(&instance_to_print.print_object);
 
+                // Nonplanar deposition plan of this object layer (not for wipe-into-object passes).
+                m_deferral_plan = nullptr;
+                if (const Layer *object_layer = layer_to_print.object_layer; object_layer && print_wipe_extrusions == 0)
+                    if (auto it = m_nonplanar_deferral.find(&instance_to_print.print_object);
+                        it != m_nonplanar_deferral.end() && ! it->second.empty()) {
+                        m_deferral_plan     = &it->second;
+                        m_deferral_key      = { &instance_to_print.print_object, size_t(instance_to_print.instance_id) };
+                        m_deferral_layer_id = object_layer->id();
+                    }
+
                 // When starting a new object, use the external motion planner for the first travel move.
                 const Point &offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
                 std::pair<const PrintObject*, Point> this_object_copy(&instance_to_print.print_object, offset);
@@ -7764,6 +7984,21 @@ LayerResult GCode::process_layer(
                             island_order.emplace_back(i);
                     }
                 }
+                // Nonplanar: islands with conformal shells first, supporting shells before the visible one.
+                if (! m_nonplanar_deferral.empty()) {
+                    auto island_key = [](const ObjectByExtruder::Island &island) {
+                        NonplanarIslandKey key;
+                        for (const ObjectByExtruder::Island::Region &region : island.by_region) {
+                            for (const ExtrusionEntity *ee : region.perimeters) collect_nonplanar_island_key(*ee, key);
+                            for (const ExtrusionEntity *ee : region.infills)    collect_nonplanar_island_key(*ee, key);
+                        }
+                        return key;
+                    };
+                    std::stable_sort(island_order.begin(), island_order.end(),
+                        [&island_key, &islands](size_t left, size_t right) {
+                            return nonplanar_island_before(island_key(islands[left]), island_key(islands[right]));
+                        });
+                }
                 for (size_t island_idx : island_order) {
                     ObjectByExtruder::Island &island = islands[island_idx];
                     const auto& by_region_specific = is_anything_overridden ? island.by_region_per_copy(by_region_per_copy_cache, static_cast<unsigned int>(instance_to_print.instance_id), extruder_id, print_wipe_extrusions != 0) : island.by_region;
@@ -7804,6 +8039,8 @@ LayerResult GCode::process_layer(
                     // ironing
                     gcode += this->extrude_infill(print,by_region_specific, true);
                 }
+                // Deferred material of this object layer (nonplanar deposition order).
+                gcode += this->emit_deferred_after_layer(instance_to_print.print_object, extruder_id);
 
                 if (this->config().gcode_label_objects) {
                     gcode += std::string("; stop printing object ") +
@@ -8102,6 +8339,8 @@ LayerResult GCode::process_layer(
                         gcode += this->extrude_infill(print, by_region_specific, true);
                     }
                 }
+                // Deferred material of this object layer (nonplanar deposition order).
+                gcode += this->emit_deferred_after_layer(instance_to_print.print_object, extruder_id);
 
                 // --- Shared support ---
                 if (instance_to_print.object_by_extruder.support && !instance_to_print.object_by_extruder.support->empty()) {
@@ -8477,6 +8716,7 @@ std::string GCode::preamble()
 std::string GCode::change_layer(coordf_t print_z)
 {
     std::string gcode;
+    m_nonplanar_printed_this_layer = false;
     if (m_layer_count > 0)
         // Increment a progress bar indicator.
         gcode += m_writer.update_progress(++ m_layer_index, m_layer_count);
@@ -8561,7 +8801,12 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     // or, if `start_point` is specified, start the loop at point closest to it
     Point last_pos = start_point ? *start_point : this->last_pos();
     float seam_overhang = std::numeric_limits<float>::lowest();
-    if (!m_config.spiral_mode && description == "perimeter") {
+    // Nonplanar: a conformal loop keeps its projected heights; no scarf
+    // seam, no wipe and no inward move (unchecked moves beside material).
+    const bool conformal_loop = has_nonplanar_source(loop);
+    if (m_loop_seam_placed) {
+        // Deferred loop: seam placed in its own layer, see defer_planar_material().
+    } else if (!m_config.spiral_mode && description == "perimeter") {
         assert(m_layer != nullptr);
         m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
     } else
@@ -8573,7 +8818,8 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     // axis into the previous layer's wall at the seam (0.28 mm at 45 degrees per
     // 0.2 mm layer); with an aligned seam that ram repeats at the same spot on
     // every layer and knocks the part loose.
-    bool enable_seam_slope = ((seam_scarf_type == SeamScarfType::External && !is_hole) || seam_scarf_type == SeamScarfType::All) &&
+    bool enable_seam_slope = ! conformal_loop && ! m_loop_seam_placed &&
+        ((seam_scarf_type == SeamScarfType::External && !is_hole) || seam_scarf_type == SeamScarfType::All) &&
         !m_config.spiral_mode && !m_config.belt_printer.value &&
         (loop.role() == erExternalPerimeter || (loop.role() == erPerimeter && m_config.seam_slope_inner_walls)) &&
         layer_id() > 0;
@@ -8619,7 +8865,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     // If region perimeters size not greater than or equal to 2, then skip the wipe inside move as we will extrude in mid air
     // as no neighbouring perimeter exists. If an internal perimeter exists, we should find 2 perimeters touching the de-retraction point
     // 1 - the currently printed external perimeter and 2 - the neighbouring internal perimeter.
-    if (m_config.wipe_before_external_loop.value && !paths.empty() && paths.front().size() > 1 && paths.back().size() > 1 && paths.front().role() == erExternalPerimeter && region_perimeters.size() > 1) {
+    if (! conformal_loop && m_config.wipe_before_external_loop.value && !paths.empty() && paths.front().size() > 1 && paths.back().size() > 1 && paths.front().role() == erExternalPerimeter && region_perimeters.size() > 1) {
         const bool is_full_loop_ccw = loop.polygon().is_counter_clockwise();
         bool is_hole_loop = (loop.loop_role() & ExtrusionLoopRole::elrHole) != 0;
         const double nozzle_diam = nozzle_diameter;
@@ -8777,13 +9023,15 @@ std::string GCode::extrude_loop(const ExtrusionLoop&                       loop_
     const bool is_ccw = loop.is_counter_clockwise();
 
     std::optional<Point> wipe_on_loops_dest;
-    if (m_config.wipe_on_loops.value && paths.back().role() == erExternalPerimeter &&
+    if (! conformal_loop && m_config.wipe_on_loops.value && paths.back().role() == erExternalPerimeter &&
         m_layer != nullptr && m_config.wall_loops.value > 1 && paths.front().size() >= 2 &&
         paths.back().polyline.points.size() >= 2)
         wipe_on_loops_dest = wipe_on_loops_destination(paths, scale_(nozzle_diameter), is_ccw, is_hole);
 
     // Orca: store loop paths in print order because inward offsets use this orientation.
-    if (m_wipe.enable && FILAMENT_CONFIG(wipe)) {
+    if (conformal_loop || m_emitting_deferred) {
+        m_wipe.reset_path();
+    } else if (m_wipe.enable && FILAMENT_CONFIG(wipe)) {
         m_wipe.update_path(paths);
 
         // A loop's role is its first path's role. An overhanging start must
@@ -8879,9 +9127,210 @@ std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const
     }
 
     // Orca: multipath wipes retrace the extrusion in reverse order.
-    if (m_wipe.enable && FILAMENT_CONFIG(wipe))
+    // Nonplanar: no wipe along conformal or deferred material (unchecked moves).
+    if (has_nonplanar_source(multipath) || m_emitting_deferred)
+        m_wipe.reset_path();
+    else if (m_wipe.enable && FILAMENT_CONFIG(wipe))
         m_wipe.update_path(multipath.paths, true);
 
+    return gcode;
+}
+
+void GCode::queue_advanced_conformal(const Print &print)
+{
+    for (const auto &[object, plan] : m_nonplanar_deferral) {
+        if (plan.advanced_paths == 0)
+            continue;
+        for (const Layer *layer : object->layers()) {
+            const int base = 2 * int(layer->id());
+            for (const LayerRegion *layerm : layer->regions()) {
+                const PrintRegion &region = print.get_print_region(layerm->region().print_region_id());
+                auto queue_paths = [&](const ExtrusionEntitiesPtr &entities, const std::string &description, FlowRole role) {
+                    std::vector<const ExtrusionPath*> paths;
+                    std::function<void(const ExtrusionEntity*)> collect = [&](const ExtrusionEntity *e) {
+                        if (auto *path = dynamic_cast<const ExtrusionPath*>(e)) paths.push_back(path);
+                        else if (auto *loop = dynamic_cast<const ExtrusionLoop*>(e)) for (const ExtrusionPath &q : loop->paths) paths.push_back(&q);
+                        else if (auto *multi = dynamic_cast<const ExtrusionMultiPath*>(e)) for (const ExtrusionPath &q : multi->paths) paths.push_back(&q);
+                        else if (auto *c = dynamic_cast<const ExtrusionEntityCollection*>(e)) for (const ExtrusionEntity *child : c->entities) collect(child);
+                    };
+                    for (const ExtrusionEntity *e : entities)
+                        collect(e);
+                    for (const ExtrusionPath *path : paths) {
+                        if (! path->nonplanar_source)
+                            continue;
+                        bool reversed = false;
+                        const auto *path_plan = plan.find(layer->id(), path->source_path_id, path->polyline, reversed);
+                        if (path_plan == nullptr)
+                            continue;
+                        for (const auto &[slot, a, b] : plan_pieces(*path_plan, reversed, polyline_length_scaled(path->polyline))) {
+                            if (slot >= base)
+                                continue;
+                            Polyline3 piece = sub_polyline(path->polyline, a, b);
+                            if (piece.points.size() < 2)
+                                continue;
+                            double zmin = std::numeric_limits<double>::max();
+                            for (const Point3 &q : piece.points)
+                                zmin = std::min(zmin, unscale<double>(q.z()));
+                            for (size_t instance = 0; instance < object->instances().size(); ++ instance)
+                                m_deferred_extrusions[{ object, instance }].push_back({ slot, base, zmin, layer->id(), layer->print_z,
+                                    std::make_shared<ExtrusionPath>(piece, *path), description, -1., &region,
+                                    unsigned(std::max(0, int(region.extruder(role)) - 1)) });
+                        }
+                    }
+                };
+                queue_paths(layerm->perimeters.entities, "perimeter", frPerimeter);
+                queue_paths(layerm->fills.entities, "infill", frSolidInfill);
+            }
+        }
+    }
+}
+
+bool GCode::defer_planar_material(const ExtrusionEntity &entity, const std::string &description, double speed, std::string &gcode)
+{
+    std::vector<const ExtrusionPath*> paths;
+    if (auto *path = dynamic_cast<const ExtrusionPath*>(&entity))
+        paths.push_back(path);
+    else if (auto *loop = dynamic_cast<const ExtrusionLoop*>(&entity))
+        for (const ExtrusionPath &p : loop->paths) paths.push_back(&p);
+    else if (auto *multi = dynamic_cast<const ExtrusionMultiPath*>(&entity))
+        for (const ExtrusionPath &p : multi->paths) paths.push_back(&p);
+
+    struct Planned { const ExtrusionPath *path; const NonplanarDeferral::PathPlan *plan; bool reversed; };
+    std::vector<Planned> planned;
+    bool any = false, cut = false;
+    int  slot = -1;
+    for (const ExtrusionPath *path : paths) {
+        bool reversed = false;
+        const auto *plan = m_deferral_plan->find(m_deferral_layer_id, path->source_path_id, path->polyline, reversed);
+        planned.push_back({ path, plan, reversed });
+        if (plan != nullptr) {
+            any = true;
+            cut |= plan->breaks.size() > 1;
+            slot = std::max(slot, plan->breaks.front().second);
+        }
+    }
+    const int base = 2 * int(m_deferral_layer_id);
+    if (! any || (! cut && slot == base))
+        return false;
+    // A whole path emitted before its home layer was queued at export start.
+    if (! cut && slot < base)
+        return true;
+
+    const double layer_z = this->layer()->print_z;
+    auto queue = [&](std::shared_ptr<ExtrusionEntity> unit, int unit_slot) {
+        double zmin = std::numeric_limits<double>::max();
+        // A planar unit keeps its own layer height (absolute, like a conformal path).
+        auto at_height = [&](ExtrusionPath &path) {
+            if (! path.nonplanar_source)
+                for (Point3 &p : path.polyline.points)
+                    p.z() = scaled<coord_t>(layer_z);
+            for (const Point3 &p : path.polyline.points)
+                zmin = std::min(zmin, unscale<double>(p.z()));
+        };
+        if (auto *loop = dynamic_cast<ExtrusionLoop*>(unit.get())) {
+            // The seam is placed now, in the loop's own layer, as
+            // extrude_loop() would; the later emission keeps it.
+            float seam_overhang = std::numeric_limits<float>::lowest();
+            if (! m_config.spiral_mode && description == "perimeter")
+                m_seam_placer.place_seam(m_layer, *loop, this->last_pos(), seam_overhang);
+            else
+                loop->split_at(this->last_pos(), false);
+            for (ExtrusionPath &path : loop->paths) at_height(path);
+        } else if (auto *multi = dynamic_cast<ExtrusionMultiPath*>(unit.get())) {
+            for (ExtrusionPath &path : multi->paths) at_height(path);
+        } else if (auto *path = dynamic_cast<ExtrusionPath*>(unit.get())) {
+            at_height(*path);
+        }
+        m_deferred_extrusions[m_deferral_key].push_back({ unit_slot, base, zmin, m_deferral_layer_id, layer_z, std::move(unit),
+            description, speed, m_current_region, m_writer.filament() ? m_writer.filament()->id() : 0u });
+    };
+
+    if (! cut) {
+        // The whole unit (shell path, wall loop, path) moves; never cut.
+        queue(std::shared_ptr<ExtrusionEntity>(entity.clone()), slot);
+        return true;
+    }
+
+    // A refined wall loop: emitted as pieces by slot.
+    std::vector<ExtrusionPath> keep;
+    for (const Planned &item : planned) {
+        const ExtrusionPath &path = *item.path;
+        if (item.plan == nullptr) {
+            keep.push_back(path);
+            continue;
+        }
+        for (const auto &[piece_slot, a, b] : plan_pieces(*item.plan, item.reversed, polyline_length_scaled(path.polyline))) {
+            Polyline3 piece = sub_polyline(path.polyline, a, b);
+            if (piece.points.size() < 2)
+                continue;
+            if (piece_slot < base)
+                continue;                   // queued at the start of the export
+            if (piece_slot == base)
+                keep.emplace_back(std::move(piece), path);
+            else
+                queue(std::make_shared<ExtrusionPath>(std::move(piece), path), piece_slot);
+        }
+    }
+    for (ExtrusionPath &path : keep)
+        gcode += this->extrude_path(path, description, speed);
+    return true;
+}
+
+std::string GCode::emit_deferred_material(int slot, unsigned int extruder_id)
+{
+    std::string gcode;
+    auto &queue = m_deferred_extrusions[m_deferral_key];
+    std::vector<DeferredExtrusion> now;
+    std::vector<DeferredExtrusion> later;
+    for (DeferredExtrusion &d : queue)
+        (d.slot == slot && d.extruder == extruder_id ? now : later).push_back(std::move(d));
+    queue = std::move(later);
+    // Within a slot the plan orders by regular emission time only.
+    std::stable_sort(now.begin(), now.end(), [](const DeferredExtrusion &a, const DeferredExtrusion &b) { return a.base < b.base; });
+    m_force_safe_travel = true;
+    m_force_safe_travel_once = false;
+    for (DeferredExtrusion &d : now) {
+        if (d.region != nullptr)
+            m_config.apply(d.region->config());
+        char buf[160];
+        sprintf(buf, ";PATH_DEFERRED from_layer=%zu from_layer_z=%.3f min_z=%.3f emitted_layer=%zu slot=%d\n", d.source_layer, d.source_layer_z, d.z, m_deferral_layer_id, slot);
+        gcode += buf;
+        const NonplanarDeferral *plan = m_deferral_plan;
+        m_deferral_plan = nullptr;
+        m_loop_seam_placed = true;
+        m_emitting_deferred = true;
+        gcode += this->extrude_entity(*d.entity, d.description, d.speed);
+        m_emitting_deferred = false;
+        gcode += ";PATH_DEFERRED_END\n";
+        m_loop_seam_placed = false;
+        m_deferral_plan = plan;
+    }
+    // The next travel leaves the deferred height and is lifted as well.
+    m_force_safe_travel_once = true;
+    return gcode;
+}
+
+std::string GCode::emit_deferred_after_layer(const PrintObject &print_object, unsigned int extruder_id)
+{
+    std::string gcode;
+    if (m_deferral_plan == nullptr)
+        return gcode;
+    // Deferred lower material of this object goes after everything of this
+    // layer, ascending in height.  After the last layer of the object, the
+    // remaining slots follow in ascending order.
+    const int  slot = 2 * int(m_deferral_layer_id) + 1;
+    const bool last = m_deferral_layer_id == print_object.layers().back()->id();
+    auto it = m_deferred_extrusions.find(m_deferral_key);
+    while (it != m_deferred_extrusions.end()) {
+        int next = std::numeric_limits<int>::max();
+        for (const DeferredExtrusion &d : it->second)
+            if (d.extruder == extruder_id && (d.slot == slot || (last && d.slot > slot)))
+                next = std::min(next, d.slot);
+        if (next == std::numeric_limits<int>::max())
+            break;
+        gcode += this->emit_deferred_material(next, extruder_id);
+    }
+    m_deferral_plan = nullptr;
     return gcode;
 }
 
@@ -8891,6 +9340,11 @@ std::string GCode::extrude_entity(const ExtrusionEntity&                     ent
                                   const std::vector<const ExtrusionEntity*>& region_perimeters,
                                   const WipeInwardSupport*                   wipe_support)
 {
+    if (m_deferral_plan != nullptr) {
+        std::string gcode;
+        if (this->defer_planar_material(entity, description, speed, gcode))
+            return gcode;
+    }
     if (const ExtrusionPath* path = dynamic_cast<const ExtrusionPath*>(&entity))
         return this->extrude_path(*path, description, speed);
     else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity))
@@ -8909,7 +9363,11 @@ std::string GCode::extrude_path(const ExtrusionPath& path, const std::string& de
     m_multi_flow_segment_path_average_mm3_per_mm = 0;
     //    description += ExtrusionEntity::role_to_string(path.role());
     std::string gcode = this->_extrude(path, description, speed);
-    if (m_wipe.enable && FILAMENT_CONFIG(wipe)) {
+    if (path.nonplanar_source || m_emitting_deferred) {
+        // A conformal path keeps its projected heights; no 2D wipe along it
+        // (nor along deferred material, see m_emitting_deferred).
+        m_wipe.reset_path();
+    } else if (m_wipe.enable && FILAMENT_CONFIG(wipe)) {
         m_wipe.reset_path();
         m_wipe.path = path.polyline.to_polyline();
         if (is_tree(this->config().support_type) && is_support(path.role())) {
@@ -8943,6 +9401,12 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
                 : (m_config.is_infill_first == is_infill_first);
             if (!should_print) continue;
 
+            m_current_region = &print.get_print_region(&region - &by_region.front());
+            // Nonplanar: conformal perimeters first, supporting shells before the
+            // visible one; planar perimeters keep their order after them.
+            ExtrusionEntitiesPtr perimeters = region.perimeters;
+            std::stable_sort(perimeters.begin(), perimeters.end(),
+                [](const ExtrusionEntity *left, const ExtrusionEntity *right) { return nonplanar_before_planar(*left, *right); });
             // Build the printed prefix once in emission order, scoped to this
             // region. Disabled or zero-length wipes need no support geometry.
             std::optional<WipeInwardSupport> wipe_support;
@@ -8977,7 +9441,7 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
                     if (!waits_for_infill(ee))
                         wipe_support->append(*ee);
 
-            for (const ExtrusionEntity* ee : region.perimeters) {
+            for (const ExtrusionEntity* ee : perimeters) {
                 if (defer_unsupported && waits_for_infill(ee) != unsupported_loops_only)
                     continue;
                 gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters,
@@ -9005,6 +9469,35 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                     extrusions.emplace_back(ee);
             if (! extrusions.empty()) {
                 m_config.apply(print.get_print_region(&region - &by_region.front()).config());
+                m_current_region = &print.get_print_region(&region - &by_region.front());
+                if (std::any_of(extrusions.begin(), extrusions.end(), [](const ExtrusionEntity *ee) { return has_nonplanar_source(*ee); })) {
+                    // Nonplanar: path planning may reverse compatible paths, but only
+                    // inside one dependency group (conformal shell by offset, then planar).
+                    std::stable_sort(extrusions.begin(), extrusions.end(),
+                        [](const ExtrusionEntity *left, const ExtrusionEntity *right) { return nonplanar_before_planar(*left, *right); });
+                    for (size_t group_begin = 0; group_begin < extrusions.size();) {
+                        size_t group_end = group_begin + 1;
+                        while (group_end < extrusions.size() && same_nonplanar_emission_group(*extrusions[group_begin], *extrusions[group_end]))
+                            ++ group_end;
+                        std::vector<const ExtrusionEntity*> group(extrusions.begin() + group_begin, extrusions.begin() + group_end);
+                        reversed.clear();
+                        chain_and_reorder_extrusion_entities(group, m_last_pos.to_point(), reversed);
+                        auto next_reversed = reversed.begin();
+                        for (const ExtrusionEntity *fill : group) {
+                            ExtrusionEntity *own_copy = next_reversed != reversed.end() && next_reversed->get() == fill ? (next_reversed++)->get() : nullptr;
+                            auto *eec = dynamic_cast<const ExtrusionEntityCollection*>(fill);
+                            if (eec) {
+                                ExtrusionEntityCollection chained = own_copy ? std::move(static_cast<ExtrusionEntityCollection&>(*own_copy)) : ExtrusionEntityCollection(*eec);
+                                if (!chained.no_sort)
+                                    chain_and_reorder_extrusion_entities(chained.entities, m_last_pos.to_point());
+                                for (ExtrusionEntity *ee : chained.entities)
+                                    gcode += this->extrude_entity(*ee, extrusion_name);
+                            } else
+                                gcode += this->extrude_entity(*fill, extrusion_name);
+                        }
+                        group_begin = group_end;
+                    }
+                } else {
                 reversed.clear();
                 chain_and_reorder_extrusion_entities(extrusions, m_last_pos.to_point(), reversed);
                 // The reversed copies are in chain order.
@@ -9021,6 +9514,7 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                             gcode += this->extrude_entity(*ee, extrusion_name);
                     } else
                         gcode += this->extrude_entity(*fill, extrusion_name);
+                }
                 }
             }
         }
@@ -9179,6 +9673,9 @@ void GCode::GCodeOutputStream::write_format(const char* format, ...)
 
 bool GCode::_needSAFC(const ExtrusionPath &path)
 {
+    // Conformal paths: extrusion per 3D length as in PrusaSlicer Nonplanar.
+    if (path.nonplanar_source)
+        return false;
     if (!m_small_area_infill_flow_compensator || !m_config.small_area_infill_flow_compensation.value)
         return false;
 
@@ -9361,6 +9858,43 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
         }
     }
 
+    // Nonplanar (ported from PrusaSlicer Nonplanar): absolute heights, task
+    // provenance for the acceptance checks, and the per-move slope check of the
+    // quantized XYZ that will be emitted.  A nearly vertical extrusion is a
+    // projection discontinuity, not a usable nonplanar surface.
+    const bool z_absolute = path_has_absolute_z(path);
+    auto absolute_point = [this](const Point3 &p) {
+        Vec3d q = this->point_to_gcode(p);
+        q.z() += m_config.z_offset.value;
+        return Vec3d(GCodeFormatter::quantize_xyzf(q.x()), GCodeFormatter::quantize_xyzf(q.y()), GCodeFormatter::quantize_xyzf(q.z()));
+    };
+    auto check_nonplanar_step = [this, &path](const Vec3d &from, const Vec3d &to) {
+        if (!path.nonplanar_source)
+            return;
+        const double dxy = std::hypot(to.x() - from.x(), to.y() - from.y());
+        const double dz = std::abs(to.z() - from.z());
+        constexpr double max_gradient = 0.21255656167002213; // tan(12 degrees)
+        // XYZ is rounded to 0.001 mm immediately before emission.  Account for
+        // that one quantization interval only.
+        constexpr double quantized_z_delta = 0.001;
+        constexpr double quantized_xy_delta = 0.0014142135623730951;
+        const double physical_xy = std::max(0.0, dxy - quantized_xy_delta);
+        if ((dxy < quantized_xy_delta && dz > quantized_z_delta) ||
+            (dxy >= quantized_xy_delta && dz > max_gradient * physical_xy + quantized_z_delta))
+            throw_nonplanar_too_steep(to.z(), m_layer != nullptr ? m_layer->id() : 0, m_config.nonplanar_layers_angle.value,
+                m_layer != nullptr ? m_layer->object()->id().id : 0,
+                "height step at G-code X" + std::to_string(to.x()) + " Y" + std::to_string(to.y()) + " Z" + std::to_string(to.z()) +
+                " (task " + std::to_string(path.source_path_id) + ")");
+    };
+    if (m_config.use_nonplanar_layers.value) {
+        const size_t task_id = m_path_task_ids.emplace(path.source_path_id, m_path_task_ids.size()).first->second;
+        gcode += ";PATH_TASK id=" + std::to_string(task_id) +
+                 " conformal=" + std::to_string(path.nonplanar_source ? 1 : 0) +
+                 " surface=" + std::to_string(path.source_surface_id) +
+                 " source_layer=" + (path.source_layer_id == size_t(-1) ? std::string("-1") : std::to_string(path.source_layer_id)) +
+                 " shell_offset=" + std::to_string(path.distance_to_top) + "\n";
+    }
+
     const ExtrusionPathSloped* sloped = dynamic_cast<const ExtrusionPathSloped*>(&path);
 
     const auto get_sloped_z = [&sloped, this](double z_ratio) {
@@ -9377,13 +9911,17 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
     // path is 2D. But in slope lift case, lift z is done in travel_to function.
     // Add m_need_change_layer_lift_z when change_layer in case of no lift if m_last_pos is equal to path.first_point() by chance
     Point first_point = path.first_point();
+    const double absolute_first_z = z_absolute ? absolute_point(path.polyline.points.front()).z() : 0.;
     if (!m_last_pos_defined || m_last_pos.to_point() != first_point || m_need_change_layer_lift_z ||
-        slope_need_z_travel) {
+        slope_need_z_travel ||
+        (z_absolute && std::abs(m_writer.get_position().z() - absolute_first_z) > 0.0005)) {
         const bool _last_pos_undefined = !m_last_pos_defined;
 
         double z = DBL_MAX;
         if (sloped != nullptr) {
             z =  get_sloped_z(sloped->slope_begin.z_ratio);
+        } else if (z_absolute) {
+            z = absolute_first_z;
         } else if (path.z_contoured && !path.polyline.lines().empty()) {
             z = unscale_(path.polyline.lines().begin()->a.z()) + m_nominal_z;
         }
@@ -9394,7 +9932,7 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
         m_belt_travel_target = nullptr;
 
         // Orca: ensure Z matches planned layer height
-        if (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z)) {
+        if (!z_absolute && !slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z)) {
             const std::string z_sync_comment = _last_pos_undefined ?
                 "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
             gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
@@ -9410,7 +9948,11 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
             gcode += m_writer.travel_to_z(first_z, "set Z for contouring", true);
         }
     }
-    if (!path.z_contoured && sloped == nullptr) {
+    if (z_absolute) {
+        // The travel ended with a vertical descent onto the first point.
+        if (GCodeFormatter::quantize_xyzf(m_writer.get_position().z()) != GCodeFormatter::quantize_xyzf(absolute_first_z))
+            gcode += m_writer.travel_to_z(absolute_first_z, "set Z for nonplanar extrusion", true);
+    } else if (!path.z_contoured && sloped == nullptr) {
         double current_z = m_writer.get_position().z();
         if (GCodeFormatter::quantize_xyz(current_z, m_config.high_precision_gcode.value) !=
             GCodeFormatter::quantize_xyz(m_nominal_z, m_config.high_precision_gcode.value)) {
@@ -9497,7 +10039,10 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
     _mm3_per_mm *= filament_flow_ratio;
 
     if (path.role() == erTopSolidInfill) {
-        _mm3_per_mm *= NOZZLE_CONFIG(top_solid_infill_flow_ratio);
+        // Top surface lines of the nonplanar top shell may use their own ratio.
+        const bool nonplanar_top = path.nonplanar_source && path.distance_to_top >= 0.f && path.distance_to_top < 1e-4f;
+        _mm3_per_mm *= nonplanar_top && m_config.set_nonplanar_top_surface_flow_ratio.value ?
+            m_config.nonplanar_top_surface_flow_ratio.value : NOZZLE_CONFIG(top_solid_infill_flow_ratio);
     } else if (path.role() == erBottomSurface) {
         _mm3_per_mm *= m_config.bottom_solid_infill_flow_ratio;
     } else if (path.role() == erInternalBridgeInfill) {
@@ -9594,6 +10139,13 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
 
     if (speed == 0)
         speed = filament_max_volumetric_speed / _mm3_per_mm;
+
+    // Nonplanar: top surfaces of an object with nonplanar layers are printed at
+    // most at this speed (smoother nonplanar tops).
+    constexpr double nonplanar_max_top_surface_speed = 50.;
+    if (path.role() == erTopSolidInfill && m_config.use_nonplanar_layers.value)
+        speed = std::min(speed, nonplanar_max_top_surface_speed);
+
     // Use the belt-aware effective layer index when on a belt printer so
     // the speed fade tracks perpendicular distance from the plane on
     // belt printers; otherwise this falls back to the slicing layer id.
@@ -9712,7 +10264,9 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
     const bool need_overhang_detection = NOZZLE_CONFIG(enable_overhang_speed) ||
         (FILAMENT_CONFIG(enable_overhang_bridge_fan) && m_enable_cooling_markers);
 
-    if (need_overhang_detection && !path_on_first_layer && !object_layer_over_raft() &&
+    // Conformal paths keep their projected heights: the overhang estimator
+    // rebuilds the points in 2D and would print them flat at the layer height.
+    if (need_overhang_detection && !path_on_first_layer && !object_layer_over_raft() && !path.nonplanar_source &&
         (is_bridge(path.role()) || is_perimeter(path.role()))) {
             bool is_external = is_external_perimeter(path.role());
             double ref_speed   = is_external ? NOZZLE_CONFIG(outer_wall_speed) : NOZZLE_CONFIG(inner_wall_speed);
@@ -10074,7 +10628,21 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
             }
             // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
             // Attention: G2 and G3 is not supported in spiral_mode mode
-            if (m_config.enable_arc_fitting.value == ArcFittingMode::Disabled || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || path.z_contoured || this->should_disable_arc_fitting()) {
+            if (z_absolute) {
+                // Nonplanar: absolute heights, extrusion per quantized 3D length,
+                // slope check per emitted move (as in PrusaSlicer Nonplanar).
+                Vec3d prev3 = absolute_point(path.polyline.points.front());
+                for (size_t i = 1; i < path.polyline.points.size(); ++ i) {
+                    const Vec3d p3 = absolute_point(path.polyline.points[i]);
+                    check_nonplanar_step(prev3, p3);
+                    const double line_length = (p3 - prev3).norm();
+                    if (line_length < EPSILON)
+                        continue;
+                    gcode += m_writer.extrude_to_xyz(p3, e_per_mm * line_length,
+                                                     GCodeWriter::full_gcode_comment ? description : "", path.is_force_no_extrusion());
+                    prev3 = p3;
+                }
+            } else if (m_config.enable_arc_fitting.value == ArcFittingMode::Disabled || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || path.z_contoured || this->should_disable_arc_fitting()) {
                 double path_length = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
                 double saved_z      = m_writer.get_position().z();
@@ -10351,6 +10919,19 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
       m_last_notgapfill_extrusion_role = path.role();
     }
 
+    // Deposited material, for the height of lifted nonplanar travels.
+    auto deposited_z = [&](const Point3 &point) {
+        return z_absolute ? unscale<double>(point.z()) + m_config.z_offset.value :
+            path.z_contoured ? m_nominal_z + unscale<double>(point.z()) : m_nominal_z;
+    };
+    if (m_config.use_nonplanar_layers.value && ! path.is_force_no_extrusion()) {
+        const double half_width = 0.5 * path.width + m_nonplanar_clearance.bead_margin;
+        const Points3 &points = path.polyline.points;
+        for (size_t i = 1; i < points.size(); ++ i)
+            m_nonplanar_heights.deposit(this->point_to_gcode(points[i - 1].to_point()), this->point_to_gcode(points[i].to_point()),
+                std::max(deposited_z(points[i - 1]), deposited_z(points[i])), half_width);
+    }
+    m_nonplanar_printed_this_layer |= path.nonplanar_source;
     this->set_last_pos(path.last_point());
     return gcode;
 }
@@ -10468,6 +11049,25 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     // check whether a straight travel move would need retraction
     LiftType lift_type = LiftType::SpiralLift;
     bool needs_retraction = this->needs_retraction(travel, role, lift_type);
+
+    // Nonplanar (ported from PrusaSlicer Nonplanar): a travel to another
+    // height, beside conformal or deferred material, or after them passes
+    // positions the deposition plan never checked.  Every such travel is a
+    // lift (the print's z-hop, higher only where the measured hotend would
+    // touch deposited material along the travel), a horizontal travel and a
+    // vertical descent onto a checked position.  A contiguous continuation (pieces of
+    // one path, a few nanometres apart after rounding) is not lifted.
+    const double target_z      = z == DBL_MAX ? m_nominal_z : z;
+    bool         nonplanar_lift = false;
+    bool         nonplanar_continuation = false;
+    if (m_config.use_nonplanar_layers.value && this->layer() != nullptr) {
+        const double layer_z      = m_nominal_z;
+        const bool   below_layer  = (m_writer.get_position().z() < layer_z - 0.0005 || target_z < layer_z - 0.0005) &&
+            travel.length() > scale_(0.05);
+        nonplanar_continuation = travel.length() <= scale_(0.05) &&
+            std::abs(target_z - m_writer.get_position().z()) <= 0.0005;
+        nonplanar_lift = (this->needs_zmove(travel, target_z) || m_force_safe_travel || below_layer) && ! nonplanar_continuation;
+    }
     // check whether wipe could be disabled without causing visible stringing
     bool could_be_wipe_disabled       = false;
     // Save state of use_external_mp_once for the case that will be needed to call twice m_avoid_crossing_perimeters.travel_to.
@@ -10584,7 +11184,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
 
     // if a retraction would be needed, try to use reduce_crossing_wall to plan a
     // multi-hop travel path inside the configuration space
-    if (m_config.reduce_crossing_wall
+    // A nonplanar continuation stays a straight move at its height.
+    if (m_config.reduce_crossing_wall && ! nonplanar_continuation
         && !m_avoid_crossing_perimeters.disabled_once()
         && m_layer != nullptr   // A brim apron layer has no Layer to avoid crossing
         && m_writer.is_current_position_clear())
@@ -10652,7 +11253,26 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     m_writer.add_object_change_labels(gcode);
 
     // use G1 because we rely on paths being straight (G0 may make round paths)
-    if (travel.size() >= 2) {
+    if (travel.size() >= 2 && nonplanar_lift) {
+        float max_z_hop = 0.f;
+        for (int i = 0; i < m_config.z_hop.size(); i++)
+            max_z_hop = std::max(max_z_hop, (float)m_config.z_hop.get_at(i));
+        // The print's z-hop above the higher end, raised only as far as the
+        // measured hotend needs above the material along this travel.
+        std::vector<Vec2d> path_xy;
+        for (const Point &p : travel.points)
+            path_xy.emplace_back(this->point_to_gcode(p));
+        const double move_z = m_nonplanar_heights.travel_height(path_xy, m_nonplanar_clearance,
+            std::max(m_writer.get_position().z(), target_z) + double(max_z_hop));
+        // The explicit lift supersedes a pending lazy z-hop of the retraction.
+        m_writer.cancel_lazy_lift();
+        gcode += m_writer.travel_to_z(move_z, "Move up for non planar extrusion", true);
+        for (size_t i = 1; i < travel.size(); ++ i)
+            gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
+        gcode += m_writer.travel_to_z(target_z, "Move down for non planar extrusion", true);
+        m_need_change_layer_lift_z = false;
+        this->set_last_pos(travel.points.back());
+    } else if (travel.size() >= 2) {
         // Orca: use `travel_to_xyz` to ensure we start at the correct z, in case we moved z in custom/filament change gcode
         if (false/*m_spiral_vase*/) {
             // No lazy z lift for spiral vase mode
@@ -10706,8 +11326,20 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         }
         this->set_last_pos(travel.points.back());
     }
+    if (m_force_safe_travel && m_force_safe_travel_once)
+        m_force_safe_travel = m_force_safe_travel_once = false;
 
     return gcode;
+}
+
+bool GCode::needs_zmove(const Polyline &travel, double target_z)
+{
+    if (std::abs(target_z - m_writer.get_position().z()) > 0.0005)
+        return true;
+    if (m_nonplanar_printed_this_layer && travel.length() >= scale_(1.0))
+        return true;
+    // skip the lift if the move is shorter than 1 mm
+    return false;
 }
 
 //BBS
@@ -10854,8 +11486,32 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
 {
     std::string gcode;
 
+    // Nonplanar objects: z-hop straight up only.  Spiral and slope lifts move
+    // horizontally at the extrusion height beside conformal material.
+    if (m_config.use_nonplanar_layers.value)
+        lift_type = LiftType::NormalLift;
+
     if (m_writer.filament() == nullptr)
         return gcode;
+
+    // Nonplanar objects: a wipe moves at the extrusion height without the
+    // process contact an extrusion is granted.  Skip it where deposited
+    // material along the wipe is higher than the nozzle within the measured
+    // hotend's reach (material at the nozzle height, such as the bead just
+    // printed, does not count).
+    if (m_config.use_nonplanar_layers.value && m_wipe.has_path()) {
+        Polyline wipe_path;
+        wipe_path.append(this->last_pos());
+        wipe_path.append(m_wipe.path.points.begin() + 1, m_wipe.path.points.end());
+        wipe_path.clip_end(wipe_path.length() - scale_(FILAMENT_CONFIG(wipe_distance)));
+        std::vector<Vec2d> wipe_xy;
+        for (const Point &p : wipe_path.points)
+            wipe_xy.emplace_back(this->point_to_gcode(p));
+        const double z = m_writer.get_position().z();
+        if (! wipe_xy.empty() &&
+            m_nonplanar_heights.travel_height(wipe_xy, m_nonplanar_clearance, z) > z + m_nonplanar_clearance.safety_mm + 1e-6)
+            m_wipe.reset_path();
+    }
 
     // wipe (if it's enabled for this extruder and we have a stored wipe path and no-zero wipe distance)
     if (FILAMENT_CONFIG(wipe) && m_wipe.has_path() && scale_(FILAMENT_CONFIG(wipe_distance)) > SCALED_EPSILON) {

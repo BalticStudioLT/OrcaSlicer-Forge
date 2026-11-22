@@ -3109,6 +3109,15 @@ void TabPrint::build()
         // Orca: it's not used yet, so hide it in UI for now
         // optgroup->append_single_option_line("ironing_expansion");
 
+        optgroup = page->new_optgroup(L("Nonplanar layers"), L"param_advanced");
+        optgroup->append_single_option_line("use_nonplanar_layers");
+        optgroup->append_single_option_line("nonplanar_layers_angle");
+        optgroup->append_single_option_line("nonplanar_layers_height");
+        optgroup->append_single_option_line("set_nonplanar_top_surface_direction");
+        optgroup->append_single_option_line("nonplanar_top_surface_direction");
+        optgroup->append_single_option_line("set_nonplanar_top_surface_flow_ratio");
+        optgroup->append_single_option_line("nonplanar_top_surface_flow_ratio");
+
         optgroup = page->new_optgroup(L("Wall generator"), L"param_wall_generator");
         optgroup->append_single_option_line("wall_generator", "quality_settings_wall_generator");
         optgroup->append_single_option_line("wall_transition_angle", "quality_settings_wall_generator#wall-transitioning-threshold-angle");
@@ -3484,6 +3493,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("spiral_starting_flow_ratio", "others_settings_special_mode#spiral-starting-flow-ratio");
         optgroup->append_single_option_line("spiral_finishing_flow_ratio", "others_settings_special_mode#spiral-finishing-flow-ratio");
 
+        optgroup->append_single_option_line("timelapse_enabled");
         optgroup->append_single_option_line("timelapse_type", "others_settings_special_mode#timelapse");
         optgroup->append_single_option_line("enable_wrapping_detection", "others_settings_special_mode#enable-clumping-detection");
 

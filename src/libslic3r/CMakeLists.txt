@@ -404,6 +404,12 @@ set(lisbslic3r_sources
     PlaceholderParser.hpp
     Platform.cpp
     Platform.hpp
+    NonplanarFacet.cpp
+    NonplanarFacet.hpp
+    NonplanarSchedule.cpp
+    NonplanarSchedule.hpp
+    NonplanarSurface.cpp
+    NonplanarSurface.hpp
     PNGReadWrite.cpp
     PNGReadWrite.hpp
     Point.cpp

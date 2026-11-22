@@ -1382,7 +1382,7 @@ static std::vector<std::string> s_Preset_print_options{
     "overhang_4_4_speed",
     "initial_layer_infill_speed",
     "only_one_wall_top",
-    "timelapse_type",
+    "timelapse_type", "timelapse_enabled",
     "wall_generator",
     "wall_transition_length",
     "wall_transition_filter_deviation",
@@ -1513,6 +1513,10 @@ static std::vector<std::string> s_Preset_print_options{
     // IDEX/IQEX parallel print mode (per-print selection)
     "imex_parallel_mode",
     "imex_head_filament_map",
+    // Nonplanar top shells
+    "use_nonplanar_layers", "nonplanar_layers_angle", "nonplanar_layers_height",
+    "set_nonplanar_top_surface_flow_ratio", "nonplanar_top_surface_flow_ratio",
+    "set_nonplanar_top_surface_direction", "nonplanar_top_surface_direction",
     // Z Anti-Aliasing (ZAA)
     "zaa_enabled",
     "zaa_minimize_perimeter_height",
