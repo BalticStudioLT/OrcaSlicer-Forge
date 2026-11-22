@@ -18,7 +18,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
-#include "test_data.hpp"
+#include "test_helpers.hpp"
 
 using namespace Slic3r;
 
