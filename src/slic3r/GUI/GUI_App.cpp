@@ -2741,10 +2741,10 @@ void GUI_App::init_webview_runtime()
 void GUI_App::init_app_config()
 {
 	// Profiles for the alpha are stored into the PrusaSlicer-alpha directory to not mix with the current release.
-    // OrcaSlicer Nonplanar keeps its own settings folder
-    // (~/Library/Application Support/OrcaSlicerNonplanar), so a normal
-    // OrcaSlicer next to it stays untouched.
-    SetAppName(SLIC3R_APP_KEY "Nonplanar");
+    // OrcaSlicer Forge keeps its own settings folder
+    // (%APPDATA%\\OrcaSlicerForge, ~/Library/Application Support/OrcaSlicerForge),
+    // so a normal OrcaSlicer next to it stays untouched.
+    SetAppName(SLIC3R_APP_KEY "Forge");
 //	SetAppName(SLIC3R_APP_KEY "-alpha");
 //  SetAppName(SLIC3R_APP_KEY "-beta");
 //	SetAppDisplayName(SLIC3R_APP_NAME);
@@ -6607,11 +6607,11 @@ void maybe_attach_updater_signature(Http& http, const std::string& canonical_que
 
 void GUI_App::check_new_version_sf(bool show_tips, int by_user)
 {
-    // OrcaSlicer Nonplanar: never offer the official OrcaSlicer as an update
+    // OrcaSlicer Forge: never offer the official OrcaSlicer as an update
     // (it has no nonplanar layers); releases are on the project page.
     if (by_user)
-        wxMessageBox(wxString::Format(_L("OrcaSlicer Nonplanar %s (based on OrcaSlicer %s).\nNew versions: %s"),
-                         ORCA_NONPLANAR_VERSION, SoftFever_VERSION, ORCA_NONPLANAR_URL),
+        wxMessageBox(wxString::Format(_L("OrcaSlicer Forge %s (based on OrcaSlicer %s).\nNew versions: %s"),
+                         ORCA_FORGE_VERSION, SoftFever_VERSION, ORCA_FORGE_URL),
                      _L("Check for Updates"), wxOK | wxICON_INFORMATION);
     return;
     AppConfig* app_config = wxGetApp().app_config;
@@ -10320,7 +10320,7 @@ static bool del_win_registry(HKEY hkeyHive, const wchar_t *pszVar, const wchar_t
 
 void GUI_App::associate_files(std::wstring extend)
 {
-    // OrcaSlicer Nonplanar: no shell integration.  File types and the
+    // OrcaSlicer Forge: no shell integration.  File types and the
     // orcaslicer:// link handler belong to an installed OrcaSlicer; writing
     // them here would take them over (shared ProgID "Orca.Slicer.1").
     return;
@@ -10353,7 +10353,7 @@ void GUI_App::associate_files(std::wstring extend)
 
 void GUI_App::disassociate_files(std::wstring extend)
 {
-    // OrcaSlicer Nonplanar: see associate_files (would remove an installed
+    // OrcaSlicer Forge: see associate_files (would remove an installed
     // OrcaSlicer's associations).
     return;
 #ifdef WIN32
@@ -10409,7 +10409,7 @@ bool GUI_App::check_url_association(std::wstring url_prefix, std::wstring& reg_b
 
 void GUI_App::associate_url(std::wstring url_prefix)
 {
-    // OrcaSlicer Nonplanar: no shell integration.  File types and the
+    // OrcaSlicer Forge: no shell integration.  File types and the
     // orcaslicer:// link handler belong to an installed OrcaSlicer; writing
     // them here would take them over (shared ProgID "Orca.Slicer.1").
     return;
@@ -10440,7 +10440,7 @@ void GUI_App::associate_url(std::wstring url_prefix)
 
 void GUI_App::disassociate_url(std::wstring url_prefix)
 {
-    // OrcaSlicer Nonplanar: no shell integration.  File types and the
+    // OrcaSlicer Forge: no shell integration.  File types and the
     // orcaslicer:// link handler belong to an installed OrcaSlicer; writing
     // them here would take them over (shared ProgID "Orca.Slicer.1").
     return;

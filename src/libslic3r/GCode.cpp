@@ -4446,7 +4446,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         // the name "BambuStudio" in a comment; without it its viewer crashes on
         // the first T command (no nozzle group set up).
         file.write("; BambuStudio G-code viewer: configuration in CONFIG_BLOCK below\n");
-        file.write_format("; OrcaSlicer Nonplanar %s (%s)\n", ORCA_NONPLANAR_VERSION, ORCA_NONPLANAR_URL);
+        file.write_format("; OrcaSlicer Forge %s (%s)\n", ORCA_FORGE_VERSION, ORCA_FORGE_URL);
         if (is_bbl_printers)
             file.write_format(";%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Estimated_Printing_Time_Placeholder).c_str());
         //BBS: total layer number

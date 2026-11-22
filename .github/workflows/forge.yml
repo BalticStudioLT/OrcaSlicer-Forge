@@ -1,0 +1,50 @@
+name: Forge build
+
+# OrcaSlicer Forge: builds the combined fork (nonplanar tops + wave overhangs + more)
+# for Windows x64 and runs the unit tests on Linux. The upstream "Build all"
+# workflow only runs on main/release branches, so it stays idle on this fork.
+
+on:
+  push:
+    branches:
+      - forge
+      - 'forge-*'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: forge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_windows:
+    name: Windows x64
+    permissions:
+      actions: write
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-latest
+      arch: x64
+      compiler: clang
+    secrets: inherit
+
+  build_linux:
+    name: Linux x64 (with unit tests)
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: ubuntu-24.04
+      arch: ''
+    secrets: inherit
+
+  unit_tests_linux:
+    name: Linux unit tests
+    needs: build_linux
+    if: ${{ !cancelled() && success() }}
+    uses: ./.github/workflows/unit_tests.yml
+    with:
+      os: ubuntu-24.04
+      artifact: ${{ github.sha }}-tests-linux-x86_64

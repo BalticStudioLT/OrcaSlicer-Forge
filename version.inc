@@ -8,6 +8,9 @@ if(NOT DEFINED BBL_INTERNAL_TESTING)
 set(BBL_INTERNAL_TESTING "0")
 endif()
 set(SoftFever_VERSION "2.5.1")
+# OrcaSlicer Forge release (About dialog, G-code header, installer name).
+set(ORCA_FORGE_VERSION "v0.1")
+set(ORCA_FORGE_URL "https://github.com/BalticStudioLT/OrcaSlicer-Forge")
 string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)"
        SoftFever_VERSION_MATCH ${SoftFever_VERSION})
 set(ORCA_VERSION_MAJOR ${CMAKE_MATCH_1})

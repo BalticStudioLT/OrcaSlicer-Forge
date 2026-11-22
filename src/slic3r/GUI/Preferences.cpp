@@ -2277,7 +2277,7 @@ void PreferencesDialog::create_items()
     //////////////////////////
     //// ASSOCIATE TAB 
     /////////////////////////////////////
-    // OrcaSlicer Nonplanar: no shell integration (see GUI_App::associate_files),
+    // OrcaSlicer Forge: no shell integration (see GUI_App::associate_files),
     // so the tab is not shown.
 #if defined(_WIN32) && 0
     // MSIX: associations are declared in the package manifest and defaults are
