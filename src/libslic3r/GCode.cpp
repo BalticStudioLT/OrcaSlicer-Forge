@@ -9404,7 +9404,7 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
             m_current_region = &print.get_print_region(&region - &by_region.front());
             // Nonplanar: conformal perimeters first, supporting shells before the
             // visible one; planar perimeters keep their order after them.
-            ExtrusionEntitiesPtr perimeters = region.perimeters;
+            std::vector<const ExtrusionEntity*> perimeters = region.perimeters;
             std::stable_sort(perimeters.begin(), perimeters.end(),
                 [](const ExtrusionEntity *left, const ExtrusionEntity *right) { return nonplanar_before_planar(*left, *right); });
             // Build the printed prefix once in emission order, scoped to this
@@ -9866,7 +9866,7 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
     auto absolute_point = [this](const Point3 &p) {
         Vec3d q = this->point_to_gcode(p);
         q.z() += m_config.z_offset.value;
-        return Vec3d(GCodeFormatter::quantize_xyzf(q.x()), GCodeFormatter::quantize_xyzf(q.y()), GCodeFormatter::quantize_xyzf(q.z()));
+        return Vec3d(GCodeFormatter::quantize_xyz(q.x(), m_config.high_precision_gcode.value), GCodeFormatter::quantize_xyz(q.y(), m_config.high_precision_gcode.value), GCodeFormatter::quantize_xyz(q.z(), m_config.high_precision_gcode.value));
     };
     auto check_nonplanar_step = [this, &path](const Vec3d &from, const Vec3d &to) {
         if (!path.nonplanar_source)
@@ -9950,7 +9950,7 @@ std::string GCode::_extrude_piece(const ExtrusionPath &path, const std::string &
     }
     if (z_absolute) {
         // The travel ended with a vertical descent onto the first point.
-        if (GCodeFormatter::quantize_xyzf(m_writer.get_position().z()) != GCodeFormatter::quantize_xyzf(absolute_first_z))
+        if (GCodeFormatter::quantize_xyz(m_writer.get_position().z(), m_config.high_precision_gcode.value) != GCodeFormatter::quantize_xyz(absolute_first_z, m_config.high_precision_gcode.value))
             gcode += m_writer.travel_to_z(absolute_first_z, "set Z for nonplanar extrusion", true);
     } else if (!path.z_contoured && sloped == nullptr) {
         double current_z = m_writer.get_position().z();
