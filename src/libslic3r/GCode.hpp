@@ -935,6 +935,19 @@ protected:
     std::string                         emit_deferred_material(int slot, unsigned int extruder_id);
     // Emit the deferred slots that belong after this object layer.
     std::string                         emit_deferred_after_layer(const PrintObject &print_object, unsigned int extruder_id);
+    // Orca: wave-overhang: true while _extrude() is processing a wave-overhang path.
+    // Used by travel_to() so the *leading* travel to a wave-overhang path uses the
+    // wave-overhang travel speed override (the flag is set before that travel emits).
+    bool                                m_inside_wave_overhang = false;
+    // Orca: accumulated wave-extrusion time on the current layer (seconds).
+    // Used by wave_overhang_min_layer_time; reset at each layer change.
+    double                              m_wave_layer_accumulated_time = 0.;
+    double                              m_wave_layer_min_time = 0.;
+    // Orca: wave nozzle temperature override scope (opened by the first wave path of a run,
+    // closed by the next non-wave path or the layer end). -1 = not active.
+    int                                 m_wave_temp_tool = -1;
+    int                                 m_wave_temp_restore = 0;
+    std::string                         wave_temp_restore_gcode();
 
     std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
     std::unique_ptr<SpiralVase>         m_spiral_vase;
