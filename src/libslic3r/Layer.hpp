@@ -114,6 +114,9 @@ public:
     void    project_nonplanar_extrusion(ExtrusionEntityCollection* collection, const NonplanarProjectionIndex& index);
     // Projects the conformal perimeters and fills of this region onto their target surfaces.
     void    project_nonplanar_surfaces();
+    // OrcaSlicer Forge: iron the joins between the bands of a tall nonplanar surface, on
+    // the home layer of the later band, after both bands are printed.
+    void    make_nonplanar_join_ironing();
     // Projects one nonplanar path.
     std::vector<ExtrusionPath> project_nonplanar_path(const ExtrusionPath& path, const NonplanarProjectionIndex& index);
     void    remove_nonplanar_slices(SurfaceCollection topNonplanar);

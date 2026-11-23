@@ -2074,6 +2074,9 @@ void Layer::make_ironing()
 		// Regions up to j were processed.
 		i = j;
 	}
+    // OrcaSlicer Forge: ironing across the joins of banded nonplanar surfaces.
+    for (LayerRegion *layerm : m_regions)
+        layerm->make_nonplanar_join_ironing();
 }
 
 } // namespace Slic3r

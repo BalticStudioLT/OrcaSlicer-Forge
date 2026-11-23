@@ -5318,6 +5318,24 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("nonplanar_iron_band_joins", coBool);
+    def->label = L("Iron band joins");
+    def->category = L("Quality");
+    def->tooltip = L("After the later of two bands is printed, iron a strip across the join between them, following the "
+                     "surface, to smooth the line where the bands meet. Uses the ironing flow, spacing and speed.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("nonplanar_join_ironing_width", coFloat);
+    def->label = L("Join ironing width");
+    def->category = L("Quality");
+    def->tooltip = L("How far the ironing reaches on each side of a band join.");
+    def->sidetext = L("mm");
+    def->min = 0.5;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(3.0));
+
     def = this->add("set_nonplanar_top_surface_flow_ratio", coBool);
     def->label = L("Set nonplanar top surface flow ratio");
     def->category = L("Quality");

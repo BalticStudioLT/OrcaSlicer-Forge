@@ -20,6 +20,7 @@
 #include "Algorithm/RegionExpansion.hpp"
 #include "libslic3r.h"
 #include "Utils.hpp"
+#include "Fill/FillBase.hpp"
 
 #include <cmath>
 #include <array>
@@ -1394,6 +1395,92 @@ void LayerRegion::project_nonplanar_surfaces()
             project_nonplanar_extrusion(collection, index);
     check_nonplanar_projected(&perimeters, *this->layer());
     check_nonplanar_projected(&fills, *this->layer());
+}
+
+void LayerRegion::make_nonplanar_join_ironing()
+{
+    const PrintObjectConfig &object_config = this->layer()->object()->config();
+    if (m_nonplanar_surfaces.empty() || ! object_config.use_nonplanar_layers.value ||
+        ! object_config.nonplanar_split_tall_surfaces.value || ! object_config.nonplanar_iron_band_joins.value)
+        return;
+    // The visible top shell of each target surface homed in this layer (the later band).
+    std::map<int, ExPolygons> here;
+    for (const Surface &s : this->slices.surfaces)
+        if (s.surface_type == stTopNonplanar && s.distance_to_top < 1e-4f)
+            here[s.source_surface_id].emplace_back(s.expolygon);
+    if (here.empty())
+        return;
+    const PrintRegionConfig &config = this->region().config();
+    const int    extruder   = std::max(1, int(this->region().extruder(frTopSolidInfill)));
+    const double nozzle_dmr = this->layer()->object()->print()->config().nozzle_diameter.get_at(size_t(extruder - 1));
+    const double spacing    = std::max(IRONING_SPACING_MIN, config.ironing_spacing.value);
+    const double height     = object_config.layer_height.value * 0.01 * config.ironing_flow.value;
+    const coord_t half_width = scale_(object_config.nonplanar_join_ironing_width.value);
+    const int    region_id  = this->region().print_object_region_id();
+    const NonplanarProjectionIndex index(m_nonplanar_surfaces);
+    for (auto &[surface_id, later] : here) {
+        // The top shell of the same surface printed in earlier bands (home layers below).
+        Polygons earlier;
+        for (const Layer *lower = this->layer()->lower_layer; lower != nullptr; lower = lower->lower_layer) {
+            if (region_id < 0 || size_t(region_id) >= lower->regions().size())
+                continue;
+            for (const Surface &s : lower->regions()[size_t(region_id)]->slices.surfaces)
+                if (s.surface_type == stTopNonplanar && s.distance_to_top < 1e-4f && s.source_surface_id == surface_id)
+                    polygons_append(earlier, to_polygons(s.expolygon));
+        }
+        if (earlier.empty())
+            continue;
+        const Polygons later_polys = to_polygons(later);
+        // A strip of +-half_width around the join, inside both bands' top shells and
+        // half a nozzle away from the outer edge of the part.
+        Polygons both = union_(earlier, later_polys);
+        ExPolygons zone = intersection_ex(intersection(offset(earlier, half_width), offset(later_polys, half_width)),
+                                          offset(both, -scale_(0.5 * nozzle_dmr)));
+        if (zone.empty())
+            continue;
+        std::unique_ptr<Fill> f(Fill::new_from_type(ipRectilinear));
+        f->set_bounding_box(this->layer()->object()->bounding_box());
+        f->layer_id = this->layer()->id();
+        f->z        = this->layer()->print_z;
+        f->overlap  = 0;
+        f->spacing  = spacing;
+        // Lines along the join (close to contour lines of the surface): the nozzle
+        // barely changes height along a line.
+        f->angle       = 0.f;
+        f->fixed_angle = false;
+        FillParams params;
+        params.density   = 1.;
+        params.monotonic = true;
+        const double extrusion_height = height * spacing / nozzle_dmr;
+        const float  extrusion_width  = Flow::rounded_rectangle_extrusion_width_from_spacing(float(nozzle_dmr), float(extrusion_height));
+        auto *eec = new ExtrusionEntityCollection();
+        eec->no_sort = true;
+        for (ExPolygon &expoly : zone) {
+            Surface surface(stTop, expoly);
+            Polylines polylines;
+            try {
+                polylines = f->fill_surface(&surface, params);
+            } catch (InfillFailedException &) {
+            }
+            extrusion_entities_append_paths(eec->entities, std::move(polylines), erIroning,
+                                            nozzle_dmr * extrusion_height, extrusion_width, float(extrusion_height));
+        }
+        if (eec->entities.empty()) {
+            delete eec;
+            continue;
+        }
+        for (ExtrusionEntity *entity : eec->entities)
+            if (auto *path = dynamic_cast<ExtrusionPath*>(entity)) {
+                path->nonplanar_source   = true;
+                path->distance_to_top    = 0.f;
+                path->source_surface_id  = surface_id;
+                path->source_layer_id    = this->layer()->id();
+                path->source_path_id     = next_nonplanar_path_id();
+            }
+        project_nonplanar_extrusion(eec, index);
+        check_nonplanar_projected(eec, *this->layer());
+        this->fills.entities.push_back(eec);
+    }
 }
 
 // Barycentric interpolation accepts points on mesh edges and both triangle

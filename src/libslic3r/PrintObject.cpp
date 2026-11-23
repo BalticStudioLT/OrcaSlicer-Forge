@@ -1890,6 +1890,11 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "nonplanar_split_tall_surfaces") {
             steps.emplace_back(posSlice);
         } else if (
+               opt_key == "nonplanar_iron_band_joins"
+            || opt_key == "nonplanar_join_ironing_width") {
+            steps.emplace_back(posIroning);
+            steps.emplace_back(posSlice);
+        } else if (
                 opt_key == "wall_generator"
             || opt_key == "wall_transition_length"
             || opt_key == "wall_transition_filter_deviation"
