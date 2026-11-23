@@ -24,3 +24,5 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   Result: banding works (aligned joins). Staggered joins are not printable in this method: each lower shell must be
   printed before the shell on top of it, so all shells must break at the same place (lower shells may break more often).
   Offered instead: toothed / wavy join line and nonplanar ironing over the join.
+- 15:59 — Yes to both (toothed join, then ironing over the join). Asked: will supports have this?
+  Done: toothed joins (±0.6 mm, 8 mm period, shared by all shells). Next: nonplanar ironing over the join.
