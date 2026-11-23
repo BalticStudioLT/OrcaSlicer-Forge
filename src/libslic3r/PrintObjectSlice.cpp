@@ -1118,7 +1118,12 @@ PrintObject::find_nonplanar_surfaces()
                 Vec3d normal = mesh.normal_by_face_id(face_id);
 
                 //TODO check if normals exist
-                if (normal.z() >= std::cos(this->nonplanar_angle() * 3.14159265/180.0)) {
+                // OrcaSlicer Forge: horizontal faces stay planar.  A flat top
+                // prints the same either way, and joined to a few sloped faces
+                // it made the whole top a nonplanar surface (a 110 x 120 mm
+                // plate with a small relief planned for hours).
+                const bool horizontal = normal.z() > std::cos(0.3 * 3.14159265 / 180.0);
+                if (! horizontal && normal.z() >= std::cos(this->nonplanar_angle() * 3.14159265/180.0)) {
                     //copy facet
                     NonplanarFacet new_facet;
                     new_facet.normal.x = normal.x();

@@ -1,3 +1,7 @@
+#include <chrono>
+#include <tbb/parallel_for.h>
+#include <tbb/blocked_range.h>
+#include <tbb/enumerable_thread_specific.h>
 #include "NonplanarSchedule.hpp"
 
 #include "ClipperUtils.hpp"
@@ -170,9 +174,18 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
     // The plan can take minutes: honour a cancel from the GUI (otherwise the
     // GUI waits for the whole plan after its stop button was pressed).
     const PrintBase *print = object.print();
-    auto throw_if_canceled = [print]() {
+    // OrcaSlicer Forge: time budget.  A plan that takes longer falls back to
+    // flat top layers for this object (see PrintObject::plan_nonplanar_or_fall_back).
+    const auto plan_start = std::chrono::steady_clock::now();
+    double plan_budget_s = 180.;
+    if (const char *b = std::getenv("NONPLANAR_PLAN_SECONDS"))
+        plan_budget_s = std::max(1., std::atof(b));
+    auto throw_if_canceled = [print, plan_start, plan_budget_s]() {
         if (print != nullptr && print->canceled())
             throw CanceledException();
+        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_start).count() > plan_budget_s)
+            throw Slic3r::SlicingError(std::string(NONPLANAR_PLAN_TIMEOUT) + " the collision-free print order took longer than " +
+                std::to_string(int(plan_budget_s)) + " s to plan.");
     };
     const auto layers = object.layers();
     size_t layer_slots = 0;
@@ -446,7 +459,16 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         });
     };
     // Units already known to follow the unit being collected (by unit index).
-    std::vector<int> collected_for;
+    // Per thread (dependents are collected in parallel): the unit that last
+    // collected each unit.  Sized lazily to the unit count of the attempt.
+    tbb::enumerable_thread_specific<std::vector<int>> collected_tls;
+    size_t collected_size = 0;
+    auto collected = [&]() -> std::vector<int>& {
+        std::vector<int> &v = collected_tls.local();
+        if (v.size() != collected_size)
+            v.assign(collected_size, -1);
+        return v;
+    };
     // Coarse cells grouped by unit (rebuilt per attempt): the highest material
     // of a group decides whether its samples can obstruct a toolhead box at all,
     // and a unit already collected is skipped as a whole.
@@ -458,6 +480,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
     auto collect_box_dependents = [&](int t, int u, std::vector<int> &out, const std::vector<char> *only = nullptr) {
         if (model.boxes.empty())
             return;
+        std::vector<int> &collected_for = collected();
         const Sample &s0 = all[size_t(t)];
         double lowest_floor = std::numeric_limits<double>::max();
         for (const NonplanarClearanceModel::Box &b : model.boxes)
@@ -622,7 +645,9 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
             }
             dependents.assign(size_t(next), {});
             dependents_known.assign(size_t(next), 0);
-            collected_for.assign(size_t(next), -1);
+            collected_size = size_t(next);
+            for (std::vector<int> &v : collected_tls)
+                v.assign(collected_size, -1);
             for (std::vector<CellGroup> &groups : cell_groups)
                 groups.clear();
             {
@@ -681,6 +706,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         auto collect_dependents = [&](int u, bool only_changed, std::vector<int> &out) {
             // A unit found once is not tested again for further samples
             // (collected_for holds the collecting unit, reset per attempt).
+            std::vector<int> &collected_for = collected();
             for (int t : members[size_t(u)]) {
                 visit_followers(t,
                     [&](int m) { const int v = unit_of[size_t(m)]; return v != u && collected_for[size_t(v)] != u && (! only_changed || changed[size_t(v)]); },
@@ -691,6 +717,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         };
         auto dependents_of = [&](int u) -> const std::vector<int>& {
             if (! dependents_known[size_t(u)]) {
+                std::vector<int> &collected_for = collected();
                 std::vector<int> &list = raw[size_t(u)];
                 const bool carried = raw_known[size_t(u)];
                 if (! carried) {
@@ -721,6 +748,27 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
             }
             return dependents[size_t(u)];
         };
+        // Fresh dependents of all units, in parallel (each unit only reads
+        // shared data and writes its own list; scratch marks are per thread).
+        {
+            std::vector<int> todo;
+            for (int u = 0; u < int(members.size()); ++ u)
+                if (! raw_known[size_t(u)])
+                    todo.push_back(u);
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, todo.size(), 8), [&](const tbb::blocked_range<size_t> &range) {
+                for (size_t k = range.begin(); k < range.end(); ++ k) {
+                    throw_if_canceled();
+                    const int u = todo[k];
+                    collect_dependents(u, false, raw[size_t(u)]);
+                    std::sort(raw[size_t(u)].begin(), raw[size_t(u)].end());
+                }
+            });
+            for (int u : todo)
+                raw_known[size_t(u)] = 1;
+            BOOST_LOG_TRIVIAL(info) << "Nonplanar deposition order: attempt " << attempt + 1 << ", " << members.size() << " units, "
+                << todo.size() << " dependent lists collected, " << all.size() << " samples ("
+                << first_conformal << " planar), " << std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_start).count() << " s";
+        }
         // Emission order is (slot, base); equal keys are unordered.
         auto unit_after = [&](int a, int b) {
             return unit_slot[size_t(a)] > unit_slot[size_t(b)] ||

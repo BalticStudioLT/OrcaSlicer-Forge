@@ -44,3 +44,13 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   Added automatic fallback: the planner runs during slicing; if no safe order exists the object is re-sliced at 8°,
   then flat, with a warning. Re-test: all 19 models slice at default settings (saddle, hood: auto 8°; egg-crate:
   auto 8° ends up flat).
+- 2026-11-24 00:29 — "try more models from internet. check each final gcode"
+  Plan: 29 more models (Stanford/graphics test models: bunny, dragon, armadillo, Lucy, Buddha, busts, teapot, cow…;
+  Prusa MK3S functional parts) + an independent G-code checker (scripts/forge/check_gcode.py) that replays every move
+  against the printed material: tip/cone/heater-block collisions, slope limit, bed bounds, extrusion amounts,
+  filament vs flat slice. Checker verified: finds 693 collisions on a dome sliced with the planner disabled, 0 with it.
+- 00:48 — "i tried slicing project and it looks like stuck" (bandymas_medalio laikiklis (2).stl, 109x118x5.9 mm plate
+  with a recessed pattern, old build A:\forge\dl, 80% Generating G-code). Cause: the collision planner, one thread,
+  hours on this model (every flat plate layer within the heater-block reach is checked against the sloped faces).
+  Done: flat (horizontal) faces never become nonplanar; dependency collection runs on all cores; planning has a
+  180 s budget, after which the object prints with flat tops and a warning. Next: algorithmic speed-up.

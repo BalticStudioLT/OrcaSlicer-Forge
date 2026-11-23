@@ -1205,6 +1205,8 @@ void PrintObject::plan_nonplanar_or_fall_back(bool need_contouring)
             int next = m_nonplanar_fallback_level + 1;
             if (next == 1 && m_config.nonplanar_layers_angle.value <= 8.)
                 next = 2;   // 8 degrees would not change anything
+            if (reason.rfind(NONPLANAR_PLAN_TIMEOUT, 0) == 0)
+                next = 2;   // too complex: a lower angle would take as long
             BOOST_LOG_TRIVIAL(warning) << "Nonplanar fallback for " << this->model_object()->name << ": level " << next << " (" << reason << ")";
             m_nonplanar_fallback_level  = next;
             m_nonplanar_fallback_reason = reason;

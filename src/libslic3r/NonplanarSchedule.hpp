@@ -30,6 +30,9 @@ class PrintObject;
 // (support), and material that would obstruct deferred material must not be
 // printed before it (access).  Both point upwards, so the closure always
 // terminates; slots beyond the last layer are emitted after it in order.
+// Start of the error message when the plan exceeds its time budget.
+#define NONPLANAR_PLAN_TIMEOUT "Nonplanar planning timed out:"
+
 struct NonplanarDeferral
 {
     // Slot of one planned path.  A path is identified by its source path id,
