@@ -26,3 +26,7 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   Offered instead: toothed / wavy join line and nonplanar ironing over the join.
 - 15:59 — Yes to both (toothed join, then ironing over the join). Asked: will supports have this?
   Done: toothed joins (±0.6 mm, 8 mm period, shared by all shells). Next: nonplanar ironing over the join.
+- 20:3x — "continue work. you can use this computer" / "continue. coolmaster on": tested the GitHub Windows build on
+  coolmaster (P1S profile). Nonplanar + band/join/ironing options show up and slicing works.
+- 20:38 — Asked: "https://github.com/fich-l/orcaslicer-nonplanar we work on this?"
+  Answer: yes. Forge = fich-l's nonplanar code ported to Orca 2.5.1 + wave overhangs + bands/toothed joins/join ironing.
