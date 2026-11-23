@@ -40,3 +40,7 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   - Still failing at the default 12°: saddle, egg-crate waves, car hood ("no print order avoids a hotend collision"
     where the surface dips into a valley at the model edge). All three slice at 8°. Egg-crate at 8° = all planar.
   - Slow: up to 8 min for the hood at 8° on 2 CPU cores (planner).
+  Follow-up (same evening): GitHub's Orca regression tests showed the Stanford Bunny failing with default settings.
+  Added automatic fallback: the planner runs during slicing; if no safe order exists the object is re-sliced at 8°,
+  then flat, with a warning. Re-test: all 19 models slice at default settings (saddle, hood: auto 8°; egg-crate:
+  auto 8° ends up flat).
