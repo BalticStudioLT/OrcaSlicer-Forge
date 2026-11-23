@@ -3113,6 +3113,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("use_nonplanar_layers");
         optgroup->append_single_option_line("nonplanar_layers_angle");
         optgroup->append_single_option_line("nonplanar_layers_height");
+        optgroup->append_single_option_line("nonplanar_split_tall_surfaces");
         optgroup->append_single_option_line("set_nonplanar_top_surface_direction");
         optgroup->append_single_option_line("nonplanar_top_surface_direction");
         optgroup->append_single_option_line("set_nonplanar_top_surface_flow_ratio");

@@ -1157,7 +1157,8 @@ PrintObject::find_nonplanar_surfaces()
 
             // check if surfaces maintain maximum printing height, if not, erase it
             for (NonplanarSurfaces::iterator it = volume_surfaces.begin(); it!=volume_surfaces.end();) {
-                if((*it).check_max_printing_height(m_config.nonplanar_layers_height.value)) {
+                // OrcaSlicer Forge: tall surfaces are printed in bands (detect_nonplanar_surfaces).
+                if(! m_config.nonplanar_split_tall_surfaces.value && (*it).check_max_printing_height(m_config.nonplanar_layers_height.value)) {
                     BOOST_LOG_TRIVIAL(trace) << "Find nonplanar surfaces - deleted one surface due to max printing height constraint";
                     it = volume_surfaces.erase(it);
                 }else {

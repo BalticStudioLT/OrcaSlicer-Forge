@@ -1395,6 +1395,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                use_nonplanar_layers))
     ((ConfigOptionFloat,               nonplanar_layers_angle))
     ((ConfigOptionFloat,               nonplanar_layers_height))
+    ((ConfigOptionBool,                nonplanar_split_tall_surfaces))
     ((ConfigOptionBool,                set_nonplanar_top_surface_flow_ratio))
     ((ConfigOptionFloat,               nonplanar_top_surface_flow_ratio))
     ((ConfigOptionBool,                set_nonplanar_top_surface_direction))

@@ -5310,6 +5310,14 @@ void PrintConfigDef::init_fff_params()
     // Bambu Lab A1 mini: 5 mm height span.
     def->set_default_value(new ConfigOptionFloat(5.0));
 
+    def = this->add("nonplanar_split_tall_surfaces", coBool);
+    def->label = L("Split tall surfaces into bands");
+    def->category = L("Quality");
+    def->tooltip = L("A sloped top that rises more than the maximum nonplanar height is printed nonplanar in bands, "
+                     "each band from its own layer, instead of planar with stair steps.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("set_nonplanar_top_surface_flow_ratio", coBool);
     def->label = L("Set nonplanar top surface flow ratio");
     def->category = L("Quality");

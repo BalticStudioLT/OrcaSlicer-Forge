@@ -1886,7 +1886,8 @@ bool PrintObject::invalidate_state_by_config_options(
         } else if (
                opt_key == "use_nonplanar_layers"
             || opt_key == "nonplanar_layers_angle"
-            || opt_key == "nonplanar_layers_height") {
+            || opt_key == "nonplanar_layers_height"
+            || opt_key == "nonplanar_split_tall_surfaces") {
             steps.emplace_back(posSlice);
         } else if (
                 opt_key == "wall_generator"
@@ -2699,6 +2700,23 @@ PrintObject::check_nonplanar_collisions(NonplanarSurface &surface)
     return false;
 }
 
+// OrcaSlicer Forge: tops of the bands a nonplanar surface is printed in, ascending, the
+// last one at the surface top.  All shells share the band tops: a lower shell is printed
+// before the shell resting on it, so its home layer must never be above theirs, which only
+// holds where the band joins of all shells coincide (staggered joins make the deposition
+// planner cut the paths into many small pieces and take minutes).
+std::vector<double> nonplanar_band_tops(double z_min, double z_max, double max_height, bool split)
+{
+    std::vector<double> tops;
+    if (split && z_max - z_min > max_height + EPSILON) {
+        const double band = std::max(1., max_height);
+        for (double top = z_min + band; top < z_max - EPSILON; top += band)
+            tops.push_back(top);
+    }
+    tops.push_back(z_max);
+    return tops;
+}
+
 void
 PrintObject::detect_nonplanar_surfaces()
 {
@@ -2741,19 +2759,32 @@ PrintObject::detect_nonplanar_surfaces()
             const ExPolygons projection = nonplanar_surface.horizontal_projection();
             float distance_to_top = 0.0f;            
             for (int shell_thickness = 0; region.config().top_shell_layers > shell_thickness; ++shell_thickness){
+                // OrcaSlicer Forge: a surface taller than the maximum nonplanar height is
+                // printed in bands, each from its own home layer, so the nozzle never dips
+                // deeper than one band.
+                std::vector<double> band_tops = nonplanar_band_tops(nonplanar_surface.stats.min.z, nonplanar_surface.stats.max.z,
+                    m_config.nonplanar_layers_height.value, m_config.nonplanar_split_tall_surfaces.value);
+                double prev_home_z = -std::numeric_limits<double>::max();
+                double home_height = 0.;
+                for (const double band_top : band_tops)
                 //search home layer where the area is projected to
                 for (LayerPtrs::reverse_iterator home_layer_it = this->m_layers.rbegin(); home_layer_it != this->m_layers.rend(); ++home_layer_it){
                     Layer* home_layer        = *home_layer_it;
                     LayerRegion &home_layerm = *home_layer->m_regions[region_id];
                     // The planar source strips must reach the highest point
-                    // of the shell; moving the full selection into its lowest
-                    // layer loses the upper target area.
-                    if (home_layer->slice_z > nonplanar_surface.stats.max.z - distance_to_top) continue;
+                    // of the shell (band); moving the full selection into its
+                    // lowest layer loses the upper target area.
+                    if (home_layer->slice_z > band_top - distance_to_top) continue;
+                    // A band too thin for a home layer of its own joins the next band.
+                    if (home_layer->slice_z <= prev_home_z) break;
 
                     //process layers
                     for (LayerPtrs::iterator layer_it = this->m_layers.begin(); layer_it != this->m_layers.end(); ++layer_it){
                         Layer* layer        = *layer_it;
                         LayerRegion &layerm = *layer->m_regions[region_id];
+
+                        // Source layers of an earlier band stay with that band.
+                        if (layer->slice_z <= prev_home_z) continue;
 
                         //skip if below minimum nonplanar surface and below the last possible surface layer
                         if (nonplanar_surface.stats.min.z-layer->height-distance_to_top > layer->slice_z) continue;
@@ -2860,10 +2891,12 @@ PrintObject::detect_nonplanar_surfaces()
                         }
                     }
 
-                    //increase distance to the top layer
-                    distance_to_top += home_layer->height;
+                    prev_home_z = home_layer->slice_z;
+                    home_height = home_layer->height;
                     break;
                 }
+                //increase distance to the top layer
+                distance_to_top += home_height;
             }
         }
     }

@@ -1532,7 +1532,7 @@ static std::vector<std::string> s_Preset_print_options{
     "imex_parallel_mode",
     "imex_head_filament_map",
     // Nonplanar top shells
-    "use_nonplanar_layers", "nonplanar_layers_angle", "nonplanar_layers_height",
+    "use_nonplanar_layers", "nonplanar_layers_angle", "nonplanar_layers_height", "nonplanar_split_tall_surfaces",
     "set_nonplanar_top_surface_flow_ratio", "nonplanar_top_surface_flow_ratio",
     "set_nonplanar_top_surface_direction", "nonplanar_top_surface_direction",
     // Z Anti-Aliasing (ZAA)
