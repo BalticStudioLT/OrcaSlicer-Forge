@@ -934,6 +934,7 @@ protected:
     void                                queue_advanced_conformal(const Print &print);
     std::string                         emit_deferred_material(int slot, unsigned int extruder_id);
     // Emit the deferred slots that belong after this object layer.
+    std::string                         emit_deferred_before_layer(unsigned int extruder_id);
     std::string                         emit_deferred_after_layer(const PrintObject &print_object, unsigned int extruder_id);
     // Orca: wave-overhang: true while _extrude() is processing a wave-overhang path.
     // Used by travel_to() so the *leading* travel to a wave-overhang path uses the

@@ -30,3 +30,13 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   coolmaster (P1S profile). Nonplanar + band/join/ironing options show up and slicing works.
 - 20:38 — Asked: "https://github.com/fich-l/orcaslicer-nonplanar we work on this?"
   Answer: yes. Forge = fich-l's nonplanar code ported to Orca 2.5.1 + wave overhangs + bands/toothed joins/join ironing.
+- 20:43 — "test with different models. difficult models."
+  Result (difficult-model test, 18 models: 10 generated shapes + Benchy, propeller, tree, dino, bridge/overhang tests,
+  RotBot wave tests):
+  - Fixed bug 1: tall wedge (bands) crashed "moved extrusions were never written" (a layer whose material all moved
+    into a band was never visited, so its "after layer" material was lost). Now written at the next layer start.
+  - Fixed bug 2: propeller crashed "fill surface without target surface" (wave-overhang floor pass rebuilt
+    nonplanar shells without their identity). Nonplanar shells are now left alone by that pass.
+  - Still failing at the default 12°: saddle, egg-crate waves, car hood ("no print order avoids a hotend collision"
+    where the surface dips into a valley at the model edge). All three slice at 8°. Egg-crate at 8° = all planar.
+  - Slow: up to 8 min for the hood at 8° on 2 CPU cores (planner).

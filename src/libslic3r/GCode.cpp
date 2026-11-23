@@ -5122,9 +5122,15 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     // Deferred material must have been emitted in its slot.  Anything left
     // would be silently missing from the print.
     for (const auto &[key, queue] : m_deferred_extrusions)
-        if (! queue.empty())
+        if (! queue.empty()) {
+            std::string slots;
+            for (size_t i = 0; i < queue.size() && i < 6; ++ i)
+                slots += " slot " + std::to_string(queue[i].slot) + " (from layer " + std::to_string(queue[i].source_layer) +
+                         ", filament " + std::to_string(queue[i].extruder) + ")";
+            BOOST_LOG_TRIVIAL(error) << "Nonplanar: unwritten deferred extrusions:" << slots;
             throw_nonplanar_internal("", std::to_string(queue.size()) + " moved extrusions were never written",
                 key.first != nullptr ? key.first->id().id : 0);
+        }
 
     //BBS: the last retraction
     // Write end commands to file.
@@ -7995,6 +8001,11 @@ LayerResult GCode::process_layer(
                         m_deferral_plan     = &it->second;
                         m_deferral_key      = { &instance_to_print.print_object, size_t(instance_to_print.instance_id) };
                         m_deferral_layer_id = object_layer->id();
+                        // Material planned after an earlier layer that this
+                        // object never visited (all of that layer's material
+                        // moved, e.g. into a band of a tall surface) goes now,
+                        // before anything of this layer: same order as planned.
+                        gcode += this->emit_deferred_before_layer(extruder_id);
                     }
 
                 // When starting a new object, use the external motion planner for the first travel move.
@@ -9424,6 +9435,24 @@ std::string GCode::emit_deferred_material(int slot, unsigned int extruder_id)
     }
     // The next travel leaves the deferred height and is lifted as well.
     m_force_safe_travel_once = true;
+    return gcode;
+}
+
+std::string GCode::emit_deferred_before_layer(unsigned int extruder_id)
+{
+    std::string gcode;
+    const int before = 2 * int(m_deferral_layer_id);
+    auto it = m_deferred_extrusions.find(m_deferral_key);
+    while (it != m_deferred_extrusions.end()) {
+        int next = std::numeric_limits<int>::max();
+        for (const DeferredExtrusion &d : it->second)
+            if (d.extruder == extruder_id && d.slot < before)
+                next = std::min(next, d.slot);
+        if (next == std::numeric_limits<int>::max())
+            break;
+        BOOST_LOG_TRIVIAL(info) << "Nonplanar: slot " << next << " written at the start of layer " << m_deferral_layer_id;
+        gcode += this->emit_deferred_material(next, extruder_id);
+    }
     return gcode;
 }
 

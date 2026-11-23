@@ -634,6 +634,21 @@ void PrintObject::make_perimeters()
     this->set_done(posPerimeters);
 }
 
+// NONPLANAR_VALIDATE: log nonplanar surfaces that lost their provenance.
+static void nonplanar_validate(const std::vector<Layer*> &layers, const char *step)
+{
+    if (! std::getenv("NONPLANAR_VALIDATE"))
+        return;
+    for (const Layer *layer : layers)
+        for (const LayerRegion *r : layer->regions())
+            for (int k = 0; k < 2; ++ k)
+                for (const Surface &s : (k ? r->fill_surfaces : r->slices).surfaces)
+                    if (s.is_nonplanar() && (s.source_surface_id < 0 || s.distance_to_top < 0))
+                        BOOST_LOG_TRIVIAL(error) << "NONPLANAR_VALIDATE after " << step << ": layer " << layer->id()
+                            << (k ? " fill_surfaces" : " slices") << " type " << int(s.surface_type) << " id " << s.source_surface_id
+                            << " d " << s.distance_to_top << " area " << s.area();
+}
+
 void PrintObject::prepare_infill()
 {
     if (! this->set_started(posPrepareInfill))
@@ -658,6 +673,7 @@ void PrintObject::prepare_infill()
     // by the cummulative area of the previous $layerm->fill_surfaces.
     this->detect_surfaces_type();
     m_print->throw_if_canceled();
+    nonplanar_validate(m_layers, "detect_surfaces_type");
 
     // Decide what surfaces are to be filled.
     // Here the stTop / stBottomBridge / stBottom infill is turned to just stInternal if zero top / bottom infill layers are configured.
@@ -673,6 +689,7 @@ void PrintObject::prepare_infill()
     // Add solid fills to ensure the shell vertical thickness.
     this->discover_vertical_shells();
     m_print->throw_if_canceled();
+    nonplanar_validate(m_layers, "discover_vertical_shells");
 
     // Debugging output.
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
@@ -696,6 +713,7 @@ void PrintObject::prepare_infill()
     // one perimeter. Example of this is the bridge over the benchy lettering.
     this->discover_horizontal_shells();
     m_print->throw_if_canceled();
+    nonplanar_validate(m_layers, "discover_horizontal_shells");
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
@@ -718,6 +736,7 @@ void PrintObject::prepare_infill()
     //FIXME This does not likely merge surfaces, which are supported by a material with different colors, but same properties.
     this->process_external_surfaces();
     m_print->throw_if_canceled();
+    nonplanar_validate(m_layers, "process_external_surfaces");
 
     // Debugging output.
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
@@ -738,6 +757,7 @@ void PrintObject::prepare_infill()
     // Also one wishes the perimeters to be supported by a full infill.
     this->clip_fill_surfaces();
     m_print->throw_if_canceled();
+    nonplanar_validate(m_layers, "clip_fill_surfaces");
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
@@ -799,6 +819,7 @@ void PrintObject::prepare_infill()
     // the following step needs to be done before combination because it may need
     // to remove only half of the combined infill
     this->bridge_over_infill();
+    nonplanar_validate(m_layers, "bridge_over_infill");
     m_print->throw_if_canceled();
 
     // Orca: authoritative wave-overhang floor-layer pass. MUST run LAST after
@@ -809,6 +830,7 @@ void PrintObject::prepare_infill()
     // the wave shadow: N=0 => stInternal (zero solid above wave, no spurious
     // internal bridges), N>=1 => N uniform stInternalSolid layers.
     this->apply_wave_overhang_floor_layer_authority();
+    nonplanar_validate(m_layers, "apply_wave_overhang_floor_layer_authority");
     m_print->throw_if_canceled();
 
     // Orca: wave-overhang bridge suppression. Runs after the floor-layer authority
@@ -817,16 +839,19 @@ void PrintObject::prepare_infill()
     // stInternalSolid. Without this pass those residuals print as bridge pattern
     // mixed in with waves, which the "instead of bridges" flag is meant to prevent.
     this->apply_wave_overhang_bridge_suppression();
+    nonplanar_validate(m_layers, "apply_wave_overhang_bridge_suppression");
     m_print->throw_if_canceled();
 
     // Orca: tag perimeters in wave/floor layers so the wall-speed overrides apply.
     // Runs after the authority + bridge-suppression passes since both depend on
     // wave_overhang_floor_polygons / wave_overhang_shadow_polygons being settled.
     this->tag_wave_overhang_perimeters();
+    nonplanar_validate(m_layers, "tag_wave_overhang_perimeters");
     m_print->throw_if_canceled();
 
     // combine fill surfaces to honor the "infill every N layers" option
     this->combine_infill();
+    nonplanar_validate(m_layers, "combine_infill");
     m_print->throw_if_canceled();
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
@@ -3154,6 +3179,12 @@ void PrintObject::apply_wave_overhang_floor_layer_authority()
                     Surfaces new_surfaces;
                     new_surfaces.reserve(surfs.size() + 6);
                     for (Surface &s : surfs) {
+                        // Forge: nonplanar shells keep their target surface and shell
+                        // offset; the wave floor never reclassifies them.
+                        if (s.is_nonplanar()) {
+                            new_surfaces.push_back(std::move(s));
+                            continue;
+                        }
                         Polygons   p       = to_polygons(s);
                         ExPolygons inside  = intersection_ex(p, shadow, ApplySafetyOffset::Yes);
                         if (inside.empty()) {
@@ -3167,7 +3198,7 @@ void PrintObject::apply_wave_overhang_floor_layer_authority()
 
                         // Outside the shadow: keep the original classification.
                         for (auto &ex_out : union_safety_offset_ex(diff_ex(p, inside_p, ApplySafetyOffset::Yes)))
-                            new_surfaces.emplace_back(orig, std::move(ex_out));
+                            new_surfaces.emplace_back(s, std::move(ex_out));
                         // Solid floor: 1..N layers above a lower wave strip.
                         if (! solid_only.empty()) {
                             const SurfaceType t = is_geometric_face ? orig : stInternalSolid;
