@@ -6828,8 +6828,11 @@ std::string GCode::generate_timelapse_gcode(const Print &print, coordf_t print_z
     // Nonplanar prints: no timelapse moves.  Their travel to the parking
     // position runs at the current layer height, which the nonplanar
     // deposition plan does not check against conformal material.
+    // Only objects that really have conformal material count: with the
+    // setting on, a model without gentle top slopes prints flat and keeps
+    // its timelapse.
     for (const PrintObject *object : print.objects())
-        if (object->config().use_nonplanar_layers.value)
+        if (auto it = m_nonplanar_deferral.find(object); it != m_nonplanar_deferral.end() && it->second.conformal_samples > 0)
             return {};
 
     std::string timelapse_gcode;
