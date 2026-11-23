@@ -15,3 +15,12 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   order **proven first**: nonplanar tops + wave overhangs → P1S hotend profile → bridge bead spacing →
   BrickLayers / Smoothificator → nonplanar ironing → arched (pre-cambered) bridges.
   Each stage ends with test prints on the P1S before the next.
+
+## 2026-11-23
+
+- 08:22 — How do slopes taller than 5 or 10 mm work? Does the top stop at an edge and continue later, or is it seamless?
+- 08:25 — Go with bands (split tall slopes), but make the bands overlap: no hard line in one place. E.g. first shell
+  joins every 3 mm, the next every 4 mm, the last (visible) every 5 mm, staggered like bricks.
+  Result: banding works (aligned joins). Staggered joins are not printable in this method: each lower shell must be
+  printed before the shell on top of it, so all shells must break at the same place (lower shells may break more often).
+  Offered instead: toothed / wavy join line and nonplanar ironing over the join.
