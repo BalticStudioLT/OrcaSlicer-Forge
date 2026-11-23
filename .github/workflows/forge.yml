@@ -16,7 +16,8 @@ on:
 
 concurrency:
   group: forge-${{ github.ref }}
-  cancel-in-progress: true
+  # Queue, do not cancel: a cancelled run loses its dependency build.
+  cancel-in-progress: false
 
 jobs:
   build_windows:

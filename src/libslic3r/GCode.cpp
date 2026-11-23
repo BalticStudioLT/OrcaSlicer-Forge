@@ -9252,7 +9252,10 @@ std::string GCode::extrude_multi_path(const ExtrusionMultiPath& multipath, const
 
 void GCode::queue_advanced_conformal(const Print &print)
 {
-    for (const auto &[object, plan] : m_nonplanar_deferral) {
+    for (const auto &deferral_entry : m_nonplanar_deferral) {
+        // Plain names: clang rejects lambdas capturing structured bindings in C++17.
+        const PrintObject       *object = deferral_entry.first;
+        const NonplanarDeferral &plan   = deferral_entry.second;
         if (plan.advanced_paths == 0)
             continue;
         for (const Layer *layer : object->layers()) {
