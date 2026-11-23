@@ -1,3 +1,4 @@
+#include "NonplanarSchedule.hpp"
 #include "ExPolygon.hpp"
 #include "Config.hpp"
 #include "Exception.hpp"
@@ -656,7 +657,7 @@ void PrintObject::prepare_infill()
     m_print->set_status(25, L("Generating infill regions"));
     // Nonplanar: the slices hold the conformal shells moved into their home
     // layers; restoring the untyped backup would undo that move.
-    if (m_typed_slices && ! m_config.use_nonplanar_layers.value) {
+    if (m_typed_slices && ! this->nonplanar_enabled()) {
         // To improve robustness of detect_surfaces_type() when reslicing (working with typed slices), see GH issue #7442.
         // The preceding step (perimeter generator) only modifies extra_perimeters and the extra perimeters are only used by discover_vertical_shells()
         // with more than a single region. If this step does not use Surface::extra_perimeters or Surface::extra_perimeters is always zero, it is safe
@@ -1171,6 +1172,66 @@ void PrintObject::estimate_curled_extrusions()
                 layer->curled_lines.clear();
         }
         //this->set_done(posEstimateCurledExtrusions);
+    }
+}
+
+double PrintObject::nonplanar_angle() const
+{
+    const double configured = m_config.nonplanar_layers_angle.value;
+    return m_nonplanar_fallback_level >= 1 ? std::min(configured, 8.) : configured;
+}
+
+void PrintObject::plan_nonplanar_or_fall_back(bool need_contouring)
+{
+    if (! m_config.use_nonplanar_layers.value || m_nonplanar_plan)
+        return;
+    const char *order_switch = std::getenv("NONPLANAR_DEPOSITION_ORDER");
+    if (order_switch != nullptr && std::string(order_switch) == "0")
+        return;
+    for (;;) {
+        if (! this->nonplanar_enabled())
+            return;
+        try {
+            m_nonplanar_plan = std::make_shared<NonplanarDeferral>(plan_nonplanar_deferral(*this, NonplanarClearanceModel()));
+            return;
+        } catch (const CanceledException &) {
+            throw;
+        } catch (const SlicingError &err) {
+            // No collision-free deposition order at this angle: step down and
+            // slice this object again (only its own steps; nothing else changes).
+            std::string reason = err.what();
+            if (size_t cut = reason.find(" Lower \""); cut != std::string::npos)
+                reason.erase(cut);
+            int next = m_nonplanar_fallback_level + 1;
+            if (next == 1 && m_config.nonplanar_layers_angle.value <= 8.)
+                next = 2;   // 8 degrees would not change anything
+            BOOST_LOG_TRIVIAL(warning) << "Nonplanar fallback for " << this->model_object()->name << ": level " << next << " (" << reason << ")";
+            m_nonplanar_fallback_level  = next;
+            m_nonplanar_fallback_reason = reason;
+            {
+                std::scoped_lock<std::mutex> lock(PrintObjectBase::state_mutex(m_print));
+                const std::initializer_list<PrintObjectStep> steps { posSlice, posPerimeters, posEstimateCurledExtrusions,
+                    posPrepareInfill, posInfill, posNonplanarProjection, posIroning, posContouring, posSupportMaterial,
+                    posDetectOverhangsForLift, posSimplifyPath, posSimplifyInfill, posSimplifySupportPath };
+                this->invalidate_steps_without_cancel(steps);
+            }
+            m_slicing_params.valid = false;
+            m_belt_floor_z_shift_cache_valid = false;
+            this->slice();
+            this->make_perimeters();
+            this->estimate_curled_extrusions();
+            this->prepare_infill();
+            this->infill();
+            this->ironing();
+            if (need_contouring)
+                this->contour_z();
+            else if (this->set_started(posContouring))
+                this->set_done(posContouring);
+            this->generate_support_material(false);
+            this->generate_belt_brim();
+            this->detect_overhangs_for_lift();
+            this->simplify_extrusion_path();
+        }
     }
 }
 
@@ -2009,6 +2070,14 @@ bool PrintObject::invalidate_state_by_config_options(
 bool PrintObject::invalidate_step(PrintObjectStep step)
 {
 	bool invalidated = Inherited::invalidate_step(step);
+    // Forge: any step that changes extrusions makes the deposition plan stale;
+    // a new slice starts again at the configured nonplanar angle.
+    if (step != posSupportMaterial && step != posSimplifySupportPath && step != posDetectOverhangsForLift)
+        m_nonplanar_plan.reset();
+    if (step == posSlice) {
+        m_nonplanar_fallback_level = 0;
+        m_nonplanar_fallback_reason.clear();
+    }
 
     // propagate to dependent steps
     if (step == posPerimeters) {
@@ -2055,6 +2124,9 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
 
 bool PrintObject::invalidate_all_steps()
 {
+    m_nonplanar_plan.reset();
+    m_nonplanar_fallback_level = 0;
+    m_nonplanar_fallback_reason.clear();
 	// First call the "invalidate" functions, which may cancel background processing.
     const bool inherited_invalidated = Inherited::invalidate_all_steps();
     const bool print_invalidated     = m_print->invalidate_all_steps();
@@ -2810,7 +2882,7 @@ void
 PrintObject::detect_nonplanar_surfaces()
 {
     //skip if not active
-    if(!m_config.use_nonplanar_layers.value) return;
+    if(! this->nonplanar_enabled()) return;
 
     bool moved_surfaces = false;
 
@@ -3063,7 +3135,7 @@ PrintObject::detect_nonplanar_surfaces()
 void
 PrintObject::project_nonplanar_surfaces()
 {
-    if(!m_config.use_nonplanar_layers.value) return;
+    if(! this->nonplanar_enabled()) return;
 
     //TODO check when steps should be invalidated
     if (is_step_done(posNonplanarProjection)) return;

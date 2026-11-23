@@ -669,6 +669,9 @@ protected:
         { return m_state.invalidate_all(PrintObjectBase::cancel_callback(m_print)); }
     bool            invalidate_all_steps_without_cancel()
         { return m_state.invalidate_all([](){}); }
+    // Forge: reset steps from inside the running process (no cancel).
+    bool            invalidate_steps_without_cancel(std::initializer_list<PrintObjectStepEnum> il)
+        { return m_state.invalidate_multiple(il.begin(), il.end(), [](){}); }
 
     bool            is_step_started_unguarded(PrintObjectStepEnum step) const { return m_state.is_started_unguarded(step); }
     bool            is_step_done_unguarded(PrintObjectStepEnum step) const { return m_state.is_done_unguarded(step); }

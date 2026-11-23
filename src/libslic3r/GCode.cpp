@@ -3641,8 +3641,12 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         const char *order_switch = std::getenv("NONPLANAR_DEPOSITION_ORDER");
         const bool  plan_order   = order_switch == nullptr || std::string(order_switch) != "0";
         for (const PrintObject *object : print.objects())
-            if (plan_order && object->config().use_nonplanar_layers.value)
-                m_nonplanar_deferral.emplace(object, plan_nonplanar_deferral(*object, NonplanarClearanceModel()));
+            if (plan_order && object->nonplanar_enabled()) {
+                if (auto planned = object->nonplanar_plan())
+                    m_nonplanar_deferral.emplace(object, *planned);
+                else
+                    m_nonplanar_deferral.emplace(object, plan_nonplanar_deferral(*object, NonplanarClearanceModel()));
+            }
         this->queue_advanced_conformal(print);
     }
     m_last_width = 0.f;

@@ -3984,6 +3984,19 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 obj->set_done(posSimplifySupportPath);
         }
     }
+    // OrcaSlicer Forge: plan the nonplanar deposition order now, so that an
+    // object without a collision-free order is re-sliced at a lower angle (or
+    // flat) instead of failing at G-code export.
+    for (PrintObject *obj : m_objects) {
+        if (obj->get_shared_object() != nullptr)
+            continue;
+        bool shared_by_other = false;
+        for (const PrintObject *other : m_objects)
+            shared_by_other |= other->get_shared_object() == obj;
+        if (shared_by_other)
+            continue;   // its layers are aliased: planned at export, no fallback
+        obj->plan_nonplanar_or_fall_back(obj->need_z_contouring());
+    }
 
     // BBS
     bool has_adaptive_layer_height = false;

@@ -1400,7 +1400,7 @@ void LayerRegion::project_nonplanar_surfaces()
 void LayerRegion::make_nonplanar_join_ironing()
 {
     const PrintObjectConfig &object_config = this->layer()->object()->config();
-    if (m_nonplanar_surfaces.empty() || ! object_config.use_nonplanar_layers.value ||
+    if (m_nonplanar_surfaces.empty() || ! this->layer()->object()->nonplanar_enabled() ||
         ! object_config.nonplanar_split_tall_surfaces.value || ! object_config.nonplanar_iron_band_joins.value)
         return;
     // The visible top shell of each target surface homed in this layer (the later band).
@@ -1654,7 +1654,7 @@ std::vector<ExtrusionPath> LayerRegion::project_nonplanar_path(const ExtrusionPa
                 const double dz = std::abs(unscale<double>(p1.z() - p0.z()));
                 if (dz > std::tan(12.0 * M_PI / 180.0) * xy + 0.03)
                     throw_nonplanar_too_steep(unscale<double>(std::max(p0.z(), p1.z())), this->layer()->id(),
-                        this->layer()->object()->config().nonplanar_layers_angle.value, this->layer()->object()->id().id,
+                        this->layer()->object()->nonplanar_angle(), this->layer()->object()->id().id,
                         "projected segment X" + std::to_string(unscale<double>(p0.x())) + " Y" + std::to_string(unscale<double>(p0.y())) +
                         " -> X" + std::to_string(unscale<double>(p1.x())) + " Y" + std::to_string(unscale<double>(p1.y())) +
                         ", XY " + std::to_string(xy) + " mm, Z " + std::to_string(dz) + " mm, surface " + std::to_string(owner));

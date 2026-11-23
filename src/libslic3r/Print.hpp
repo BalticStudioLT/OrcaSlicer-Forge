@@ -66,6 +66,7 @@ class PrintObject;
 class SupportLayer;
 // BBS
 class TreeSupportData;
+struct NonplanarDeferral;
 class TreeSupport;
 class ExtrusionLayers;
 namespace MultiNozzleUtils { class NozzleGroupResultBase; class LayeredNozzleGroupResult; }
@@ -595,6 +596,22 @@ private:
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
 
+public:
+    // OrcaSlicer Forge: nonplanar fallback.  Level 0 uses the configured
+    // maximum nonplanar angle, level 1 at most 8 degrees, level 2 turns
+    // nonplanar tops off for this object.  Print::process() steps down when
+    // the deposition planner finds no collision-free order, so a model never
+    // fails to slice because of nonplanar tops.
+    bool   nonplanar_enabled() const { return m_config.use_nonplanar_layers.value && m_nonplanar_fallback_level < 2; }
+    double nonplanar_angle() const;
+    int    nonplanar_fallback_level() const { return m_nonplanar_fallback_level; }
+    // Deposition plan computed by Print::process() (null: not planned yet).
+    std::shared_ptr<const NonplanarDeferral> nonplanar_plan() const { return m_nonplanar_plan; }
+    // Plan the deposition order; on failure re-slice this object one level
+    // lower.  Returns after a plan was found or nonplanar tops are off.
+    void plan_nonplanar_or_fall_back(bool need_contouring);
+private:
+
     /**
      * @brief Determines the unprintable filaments for each extruder based on its printable area.
      *
@@ -726,6 +743,9 @@ private:
     // so that next call to make_perimeters() performs a union() before computing loops
     bool                    				m_typed_slices = false;
     NonplanarSurfaces                       m_nonplanar_surfaces;
+    int                                     m_nonplanar_fallback_level { 0 };
+    std::string                             m_nonplanar_fallback_reason;
+    std::shared_ptr<const NonplanarDeferral> m_nonplanar_plan;
 
     FillAdaptive::RegionOctrees             m_adaptive_fill_octrees;
     std::vector<BoundingBox>                m_separated_body_bboxes;

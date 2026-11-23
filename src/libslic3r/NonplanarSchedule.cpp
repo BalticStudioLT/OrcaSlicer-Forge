@@ -1025,7 +1025,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
                 return path.distance_to_top < 0.001f ? "nonplanar top surface" : "nonplanar shell below the top surface";
             return is_perimeter(path.role()) ? "walls" : "infill";
         };
-        const double angle = object.config().nonplanar_layers_angle.value;
+        const double angle = object.nonplanar_angle();
         std::string message = "Nonplanar slicing failed";
         if (conflict_a >= 0) {
             const Sample &a = all[size_t(conflict_a)];

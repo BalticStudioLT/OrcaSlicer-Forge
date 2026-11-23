@@ -1073,7 +1073,16 @@ void
 PrintObject::find_nonplanar_surfaces()
 {
     //skip if not active
-    if(!m_config.use_nonplanar_layers.value) {
+    const std::string object_name = this->model_object()->name.empty() ? std::string("this object") :
+        "\"" + this->model_object()->name + "\"";
+    if (m_config.use_nonplanar_layers.value && m_nonplanar_fallback_level > 0)
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            m_nonplanar_fallback_level >= 2 ?
+                "Nonplanar top surfaces were turned off for " + object_name + ": " + m_nonplanar_fallback_reason +
+                " The object is sliced with flat top layers." :
+                "Nonplanar top surfaces of " + object_name + " use a maximum angle of 8 degrees instead of " +
+                std::to_string(int(std::lround(m_config.nonplanar_layers_angle.value))) + ": " + m_nonplanar_fallback_reason);
+    if(! this->nonplanar_enabled()) {
         BOOST_LOG_TRIVIAL(debug) << "Find nonplanar surfaces - disabled";
         return;
     }
@@ -1109,7 +1118,7 @@ PrintObject::find_nonplanar_surfaces()
                 Vec3d normal = mesh.normal_by_face_id(face_id);
 
                 //TODO check if normals exist
-                if (normal.z() >= std::cos(m_config.nonplanar_layers_angle.value * 3.14159265/180.0)) {
+                if (normal.z() >= std::cos(this->nonplanar_angle() * 3.14159265/180.0)) {
                     //copy facet
                     NonplanarFacet new_facet;
                     new_facet.normal.x = normal.x();
