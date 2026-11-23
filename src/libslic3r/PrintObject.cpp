@@ -2705,16 +2705,75 @@ PrintObject::check_nonplanar_collisions(NonplanarSurface &surface)
 // before the shell resting on it, so its home layer must never be above theirs, which only
 // holds where the band joins of all shells coincide (staggered joins make the deposition
 // planner cut the paths into many small pieces and take minutes).
+// Toothed band joins: the join height varies by +-amplitude in a triangle wave along the
+// join, so two bands interlock like a finger joint instead of meeting in a straight line.
+// A band then reaches amplitude above and below its nominal joins, so its nominal height
+// is the maximum height minus twice the amplitude.
+static constexpr double nonplanar_join_amplitude = 0.6;  // mm (3 layers of 0.2 mm)
+static constexpr double nonplanar_join_period    = 8.0;  // mm along the join
+
 std::vector<double> nonplanar_band_tops(double z_min, double z_max, double max_height, bool split)
 {
     std::vector<double> tops;
     if (split && z_max - z_min > max_height + EPSILON) {
-        const double band = std::max(1., max_height);
+        const double band = std::max(1., max_height - 2. * nonplanar_join_amplitude);
         for (double top = z_min + band; top < z_max - EPSILON; top += band)
             tops.push_back(top);
     }
     tops.push_back(z_max);
     return tops;
+}
+
+// Direction along the band joins of a surface: perpendicular to its mean uphill direction.
+static Vec2d nonplanar_join_direction(const NonplanarSurface &surface)
+{
+    Vec2d downhill = Vec2d::Zero();
+    for (const auto &[id, facet] : surface.mesh) {
+        const Vec3d a(facet.vertex[0].x, facet.vertex[0].y, facet.vertex[0].z);
+        const Vec3d b(facet.vertex[1].x, facet.vertex[1].y, facet.vertex[1].z);
+        const Vec3d c(facet.vertex[2].x, facet.vertex[2].y, facet.vertex[2].z);
+        const Vec3d n = (b - a).cross(c - a);            // length = 2 * area
+        if (n.z() > 0.)
+            downhill += Vec2d(n.x(), n.y());
+    }
+    if (downhill.norm() < EPSILON)
+        return Vec2d(0., 1.);
+    downhill.normalize();
+    return Vec2d(-downhill.y(), downhill.x());
+}
+
+// Region of `bbox` where the tooth offset t(u) = amplitude * tri(u / period) is at least c,
+// u = position along `dir`, tri a triangle wave between -1 and 1.
+static Polygons nonplanar_teeth_at_least(const BoundingBox &bbox, const Vec2d &dir, double c)
+{
+    const double A = nonplanar_join_amplitude, P = nonplanar_join_period;
+    Polygons out;
+    if (c > A)
+        return out;
+    if (c <= -A) {
+        out.emplace_back(bbox.polygon());
+        return out;
+    }
+    // tri(v) >= c / A where the distance of v to the nearest integer is at least w.
+    const double w = (c / A + 1.) / 4.;
+    const Vec2d  q(dir.y(), -dir.x());
+    double umin = std::numeric_limits<double>::max(), umax = -umin, smin = umin, smax = -umin;
+    for (const Point &pt : bbox.polygon().points) {
+        const Vec2d v = unscale(pt);
+        umin = std::min(umin, v.dot(dir)); umax = std::max(umax, v.dot(dir));
+        smin = std::min(smin, v.dot(q));   smax = std::max(smax, v.dot(q));
+    }
+    smin -= 1.; smax += 1.;
+    for (double k = std::floor(umin / P) - 1.; k * P <= umax + P; k += 1.) {
+        const double u0 = P * (k + w), u1 = P * (k + 1. - w);
+        if (u1 - u0 < EPSILON)
+            continue;
+        Polygon rect;
+        for (const auto &[u, s] : { std::pair<double, double>{ u0, smin }, { u1, smin }, { u1, smax }, { u0, smax } })
+            rect.points.emplace_back(scaled<coord_t>(u * dir.x() + s * q.x()), scaled<coord_t>(u * dir.y() + s * q.y()));
+        out.emplace_back(std::move(rect));
+    }
+    return intersection(out, Polygons{ bbox.polygon() });
 }
 
 void
@@ -2766,7 +2825,16 @@ PrintObject::detect_nonplanar_surfaces()
                     m_config.nonplanar_layers_height.value, m_config.nonplanar_split_tall_surfaces.value);
                 double prev_home_z = -std::numeric_limits<double>::max();
                 double home_height = 0.;
-                for (const double band_top : band_tops)
+                // The joins are toothed (see nonplanar_join_amplitude); all shells share
+                // the teeth, so a lower shell never belongs to a later band than the
+                // shell on it.
+                const double tooth = band_tops.size() > 1 ? nonplanar_join_amplitude : 0.;
+                const Vec2d  join_dir = nonplanar_join_direction(nonplanar_surface);
+                for (size_t band_idx = 0; band_idx < band_tops.size(); ++ band_idx) {
+                const bool   last_band  = band_idx + 1 == band_tops.size();
+                const double join_above = last_band ? std::numeric_limits<double>::max() : band_tops[band_idx];
+                const double join_below = band_idx == 0 ? -std::numeric_limits<double>::max() : band_tops[band_idx - 1];
+                const double band_top   = last_band ? band_tops[band_idx] : band_tops[band_idx] + tooth;
                 //search home layer where the area is projected to
                 for (LayerPtrs::reverse_iterator home_layer_it = this->m_layers.rbegin(); home_layer_it != this->m_layers.rend(); ++home_layer_it){
                     Layer* home_layer        = *home_layer_it;
@@ -2783,8 +2851,10 @@ PrintObject::detect_nonplanar_surfaces()
                         Layer* layer        = *layer_it;
                         LayerRegion &layerm = *layer->m_regions[region_id];
 
-                        // Source layers of an earlier band stay with that band.
-                        if (layer->slice_z <= prev_home_z) continue;
+                        // The surface height this layer's strip belongs to, and its
+                        // share of this band between the toothed joins.
+                        const double strip_z = layer->slice_z + distance_to_top;
+                        if (strip_z <= join_below - tooth) continue;
 
                         //skip if below minimum nonplanar surface and below the last possible surface layer
                         if (nonplanar_surface.stats.min.z-layer->height-distance_to_top > layer->slice_z) continue;
@@ -2845,6 +2915,22 @@ PrintObject::detect_nonplanar_surfaces()
                             );
                         }
 
+                        // Toothed joins: keep the part of the strip that belongs to this band,
+                        // join_below + t(u) < strip_z <= join_above + t(u).
+                        if (topNonplanar.size() > 0 && tooth > 0. &&
+                            (strip_z <= join_below + tooth || strip_z > join_above - tooth)) {
+                            const BoundingBox bbox = get_extents(projection).inflated(scale_(2.));
+                            Polygons keep { bbox.polygon() };
+                            if (strip_z > join_above - tooth)
+                                keep = intersection(keep, nonplanar_teeth_at_least(bbox, join_dir, strip_z - join_above));
+                            if (strip_z <= join_below + tooth)
+                                keep = diff(keep, nonplanar_teeth_at_least(bbox, join_dir, strip_z - join_below));
+                            Surfaces kept;
+                            for (const Surface &piece : topNonplanar.surfaces)
+                                surfaces_append(kept, intersection_ex(ExPolygons{ piece.expolygon }, keep), piece);
+                            topNonplanar.surfaces = std::move(kept);
+                        }
+
                         // Material already assigned to a shell keeps its first owner.
                         // A second claim on the same area would print it twice.
                         if (topNonplanar.size() > 0) {
@@ -2894,6 +2980,7 @@ PrintObject::detect_nonplanar_surfaces()
                     prev_home_z = home_layer->slice_z;
                     home_height = home_layer->height;
                     break;
+                }
                 }
                 //increase distance to the top layer
                 distance_to_top += home_height;
