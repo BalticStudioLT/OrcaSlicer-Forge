@@ -602,7 +602,16 @@ public:
     // nonplanar tops off for this object.  Print::process() steps down when
     // the deposition planner finds no collision-free order, so a model never
     // fails to slice because of nonplanar tops.
-    bool   nonplanar_enabled() const { return m_config.use_nonplanar_layers.value && m_nonplanar_fallback_level < 2; }
+    bool   nonplanar_enabled() const {
+        return m_config.use_nonplanar_layers.value && m_nonplanar_fallback_level < 2 && ! this->nonplanar_blocked_by_contouring();
+    }
+    // Z contouring is on for a region of this object (it takes precedence).
+    bool   nonplanar_blocked_by_contouring() const {
+        for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id)
+            if (this->printing_region(region_id).config().zaa_enabled.value)
+                return true;
+        return false;
+    }
     double nonplanar_angle() const;
     int    nonplanar_fallback_level() const { return m_nonplanar_fallback_level; }
     // Deposition plan computed by Print::process() (null: not planned yet).

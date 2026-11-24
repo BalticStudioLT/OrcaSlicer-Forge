@@ -1082,16 +1082,16 @@ PrintObject::find_nonplanar_surfaces()
                 " The object is sliced with flat top layers." :
                 "Nonplanar top surfaces of " + object_name + " use a maximum angle of 8 degrees instead of " +
                 std::to_string(int(std::lround(m_config.nonplanar_layers_angle.value))) + ": " + m_nonplanar_fallback_reason);
+    // Z contouring (anti-aliasing) and nonplanar shells both set the height of
+    // extrusions; they are mutually exclusive.  Contouring is the explicit
+    // choice (nonplanar tops are on by default), so it wins.
+    if (m_config.use_nonplanar_layers.value && this->nonplanar_blocked_by_contouring())
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            "Nonplanar top surfaces are off for " + object_name + " because Z contouring is on.");
     if(! this->nonplanar_enabled()) {
         BOOST_LOG_TRIVIAL(debug) << "Find nonplanar surfaces - disabled";
         return;
     }
-    // Z contouring (anti-aliasing) and nonplanar shells both set the height of
-    // extrusions; they are mutually exclusive.
-    for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id)
-        if (this->printing_region(region_id).config().zaa_enabled.value)
-            throw Slic3r::SlicingError(_u8L("Nonplanar layers and Z contouring cannot be used together. "
-                                            "Disable one of them for this object."));
 
     BOOST_LOG_TRIVIAL(info) << "Find nonplanar surfaces - start";
 

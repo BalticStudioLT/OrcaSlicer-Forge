@@ -750,27 +750,6 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
             }
             return dependents[size_t(u)];
         };
-        // Fresh dependents of all units, in parallel (each unit only reads
-        // shared data and writes its own list; scratch marks are per thread).
-        {
-            std::vector<int> todo;
-            for (int u = 0; u < int(members.size()); ++ u)
-                if (! raw_known[size_t(u)])
-                    todo.push_back(u);
-            tbb::parallel_for(tbb::blocked_range<size_t>(0, todo.size(), 8), [&](const tbb::blocked_range<size_t> &range) {
-                for (size_t k = range.begin(); k < range.end(); ++ k) {
-                    throw_if_canceled();
-                    const int u = todo[k];
-                    collect_dependents(u, false, raw[size_t(u)]);
-                    std::sort(raw[size_t(u)].begin(), raw[size_t(u)].end());
-                }
-            });
-            for (int u : todo)
-                raw_known[size_t(u)] = 1;
-            BOOST_LOG_TRIVIAL(info) << "Nonplanar deposition order: attempt " << attempt + 1 << ", " << members.size() << " units, "
-                << todo.size() << " dependent lists collected, " << all.size() << " samples ("
-                << first_conformal << " planar), " << std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_start).count() << " s";
-        }
         // Emission order is (slot, base); equal keys are unordered.
         auto unit_after = [&](int a, int b) {
             return unit_slot[size_t(a)] > unit_slot[size_t(b)] ||
@@ -859,6 +838,28 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
             }
         }
 
+        // Dependents of the conformal shells (where the propagation below starts),
+        // in parallel: each unit only reads shared data and writes its own list;
+        // scratch marks are per thread.  Other units stay lazy (dependents_of).
+        {
+            std::vector<int> todo;
+            for (int u = 0; u < int(members.size()); ++ u)
+                if (! raw_known[size_t(u)] && i_is_conformal(members[size_t(u)].front()))
+                    todo.push_back(u);
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, todo.size(), 8), [&](const tbb::blocked_range<size_t> &range) {
+                for (size_t k = range.begin(); k < range.end(); ++ k) {
+                    throw_if_canceled();
+                    const int u = todo[k];
+                    collect_dependents(u, false, raw[size_t(u)]);
+                    std::sort(raw[size_t(u)].begin(), raw[size_t(u)].end());
+                }
+            });
+            for (int u : todo)
+                raw_known[size_t(u)] = 1;
+            BOOST_LOG_TRIVIAL(info) << "Nonplanar deposition order: attempt " << attempt + 1 << ", " << members.size() << " units, "
+                << todo.size() << " dependent lists collected, " << all.size() << " samples ("
+                << first_conformal << " planar), " << std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_start).count() << " s";
+        }
         std::vector<int> parent(members.size(), -1);
         std::vector<int> worklist;
         std::vector<int> cycle;
