@@ -60,3 +60,9 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   lid has a ~0.05 mm cone graze inside one shell (beads of one shell keep their order); nonplanar slices use up to
   ~20% more filament (solid infill under the shells instead of sparse, not double material). Local test profile was
   A1 mini until now; switched to a flattened P1S profile. The hotend shape is still the A1 mini one.
+  Final for this round (48 models, P1S profile, every G-code checked): 39 PASS, 5 WARN (+19-25% filament: solid
+  infill under the shells), 1 FAIL (teapot: 33 cone grazes ~0.05 mm inside one shell), 3 meshes with holes (fail flat
+  too). Non-planar used on 20/48 (Benchy, propeller, RotBot waves, Prusa X-carriage/extruder parts, spot, teapot, ...).
+  Also fixed: eager dependency collection made planning slow (Bunny 222 s -> 62 s); Z contouring now wins over
+  non-planar with a warning. Windows build for testing: A:\forge\dl3.
+  Next: order beads inside a shell low-to-high (teapot graze), sparse infill under shells, faster planner.
