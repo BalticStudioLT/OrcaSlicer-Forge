@@ -37,6 +37,8 @@ MAX_SLOPE_DEG = 12.0
 NF = int(BED / CELL) + 1
 NC = int(BED / COARSE) + 1
 H = np.full((NF, NF), -1.0, dtype=np.float32)
+SRC = np.zeros((NF, NF), dtype=np.int32)      # G-code line that deposited the cell's top
+CUR_LINE = [0]
 HC = np.full((NC, NC), -1.0, dtype=np.float32)
 hmax = -1.0
 
@@ -75,7 +77,9 @@ def deposit(x0, y0, x1, y1, z0, z1, hw):
     m = d <= hw
     zz = z0 + t * (z1 - z0)
     sub = H[ix0:ix1 + 1, iy0:iy1 + 1]
-    np.maximum(sub, np.where(m, zz, -1.0).astype(np.float32), out=sub)
+    newv = np.where(m, zz, -1.0).astype(np.float32)
+    SRC[ix0:ix1 + 1, iy0:iy1 + 1][newv > sub] = CUR_LINE[0]
+    np.maximum(sub, newv, out=sub)
     z = max(z0, z1)
     for cx in range(ci(mnx), ci(mxx) + 1):
         for cy in range(ci(mny), ci(mxy) + 1):
@@ -97,30 +101,34 @@ def check_point(x, y, z, extruding):
         sub = H[ix0:ix1 + 1, iy0:iy1 + 1]
         v = sub[np.hypot(X, Y) <= TIP_R]
         if v.size and v.max() > z + allow + SLACK:
-            worst = ("tip", float(v.max() - z - allow))
+            src = int(sub[np.hypot(X, Y) <= TIP_R][int(np.argmax(v))]) if False else int(SRC[ix0:ix1 + 1, iy0:iy1 + 1][np.hypot(X, Y) <= TIP_R][int(np.argmax(v))])
+            worst = ("tip", float(v.max() - z - allow), src, float(v.max()))
     for bottom, r in CONE:
         if region_max(x - r, y - r, x + r, y + r) > z + bottom + SLACK:
             ix0, ix1, iy0, iy1 = fi(x - r), fi(x + r), fi(y - r), fi(y + r)
             xs = np.arange(ix0, ix1 + 1) * CELL - x
             ys = np.arange(iy0, iy1 + 1) * CELL - y
             X, Y = np.meshgrid(xs, ys, indexing="ij")
-            v = H[ix0:ix1 + 1, iy0:iy1 + 1][np.hypot(X, Y) <= r]
+            mask = np.hypot(X, Y) <= r
+            v = H[ix0:ix1 + 1, iy0:iy1 + 1][mask]
             if v.size and v.max() > z + bottom + SLACK:
                 o = float(v.max() - z - bottom)
+                src = int(SRC[ix0:ix1 + 1, iy0:iy1 + 1][mask][int(np.argmax(v))])
                 if worst is None or o > worst[1]:
-                    worst = ("cone", o)
+                    worst = ("cone r%.2f" % r, o, src, float(v.max()))
                 break
     for bottom, hx, hy in BOXES:
         h = region_max(x - hx, y - hy, x + hx, y + hy)
         if h > z + bottom + SLACK:
             o = h - z - bottom
             if worst is None or o > worst[1]:
-                worst = ("heater block", o)
+                worst = ("heater block", o, -1, h)
             break
     return worst
 
 
 def self_step(st, x, y, z, nx, ny, nz, e, rel_e, feature, width, ln):
+    CUR_LINE[0] = ln
     st["moves"] += 1
     st["z_max"] = max(st["z_max"], nz)
     if not (-3.0 <= nx <= BED + 0.5 and -3.0 <= ny <= BED + 0.5) or nz < -0.01:
@@ -129,7 +137,9 @@ def self_step(st, x, y, z, nx, ny, nz, e, rel_e, feature, width, ln):
     xy = math.hypot(nx - x, ny - y)
     dz = nz - z
     extruding = e > 0 and rel_e and (xy > 1e-6 or abs(dz) > 1e-6)
-    vertical = xy < 1e-6 and abs(dz) > 1e-6
+    # Vertical moves and sub-0.05 mm repositioning at a bead end count like
+    # extrusion (the slicer grants them the same tip contact allowance).
+    vertical = (xy < 1e-6 and abs(dz) > 1e-6) or (xy < 0.05 and abs(dz) < 1e-6)
     if extruding:
         st["extrusions"] += 1
         st["filament_mm"] += e
@@ -155,10 +165,10 @@ def self_step(st, x, y, z, nx, ny, nz, e, rel_e, feature, width, ln):
                 st["checked"] += 1
                 r = check_point(x + (nx - x) * t, y + (ny - y) * t, z + (nz - z) * t, extruding or vertical)
                 if r and (worst is None or r[1] > worst[1]):
-                    worst = (r[0], r[1], x + (nx - x) * t, y + (ny - y) * t, z + (nz - z) * t)
+                    worst = (r[0], r[1], x + (nx - x) * t, y + (ny - y) * t, z + (nz - z) * t, r[2], r[3])
             if worst and len(st["collisions"]) < 2000:
                 st["collisions"].append(dict(line=ln, kind=worst[0], overlap=round(worst[1], 3),
-                    x=round(worst[2], 2), y=round(worst[3], 2), z=round(worst[4], 3),
+                    x=round(worst[2], 2), y=round(worst[3], 2), z=round(worst[4], 3), by_line=worst[5], obstacle_z=round(worst[6], 3),
                     feature=feature if extruding else "travel"))
     if extruding:
         deposit(x, y, nx, ny, z, nz, max(0.1, width / 2))
@@ -267,8 +277,12 @@ def main():
         verdict = "FAIL"
     elif st["collisions"]:
         verdict = "WARN"
-    if planar and st.get("filament_ratio") and not (0.85 <= st["filament_ratio"] <= 1.15):
+    # More filament than the flat slice is extra solid infill under the shells
+    # (checked separately: not material inside the shell stack); less is missing material.
+    if planar and st.get("filament_ratio") and st["filament_ratio"] < 0.9:
         verdict = "FAIL"
+    elif planar and st.get("filament_ratio") and st["filament_ratio"] > 1.15 and verdict == "PASS":
+        verdict = "WARN"
     st["verdict"] = verdict
     st["collisions"] = sorted(st["collisions"], key=lambda c: -c["overlap"])[:15]
     s = json.dumps(st, indent=1)

@@ -5322,9 +5322,11 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Iron band joins");
     def->category = L("Quality");
     def->tooltip = L("After the later of two bands is printed, iron a strip across the join between them, following the "
-                     "surface, to smooth the line where the bands meet. Uses the ironing flow, spacing and speed.");
+                     "surface, to smooth the line where the bands meet. Uses the ironing flow, spacing and speed. "
+                     "Ironing slopes near the maximum angle brushes the nozzle cone, so with this on the slicer may "
+                     "lower the angle for the object.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(true));
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("nonplanar_join_ironing_width", coFloat);
     def->label = L("Join ironing width");

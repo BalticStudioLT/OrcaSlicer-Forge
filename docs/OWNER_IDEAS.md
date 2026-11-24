@@ -54,3 +54,9 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   hours on this model (every flat plate layer within the heater-block reach is checked against the sloped faces).
   Done: flat (horizontal) faces never become nonplanar; dependency collection runs on all cores; planning has a
   180 s budget, after which the object prints with flat tops and a warning. Next: algorithmic speed-up.
+  Big test (P1S profile, 48 models incl. 29 more from GitHub: Stanford/graphics models, Prusa MK3S parts), every final
+  G-code checked. Found and fixed: band-join ironing was never ordered by the planner -> nozzle collisions (thin fin
+  105); now ordered, and join ironing is OFF by default (ironing a 12° slope brushes the nozzle cone). Known: teapot
+  lid has a ~0.05 mm cone graze inside one shell (beads of one shell keep their order); nonplanar slices use up to
+  ~20% more filament (solid infill under the shells instead of sparse, not double material). Local test profile was
+  A1 mini until now; switched to a flattened P1S profile. The hotend shape is still the A1 mini one.

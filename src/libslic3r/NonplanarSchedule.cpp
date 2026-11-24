@@ -205,7 +205,9 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
             for (const ExtrusionEntity *entity : layerm->perimeters.entities) collect_paths(entity, paths);
             for (const ExtrusionEntity *entity : layerm->fills.entities) collect_paths(entity, paths);
             for (const auto &[path, unit] : paths) {
-                if (path->role() == erIroning || path->polyline.points.empty())
+                // Planar ironing smooths material already planned; the ironing
+                // of band joins is conformal and is ordered like its top shell.
+                if ((path->role() == erIroning && ! path->nonplanar_source) || path->polyline.points.empty())
                     continue;
                 if (path->nonplanar_source)
                 {
