@@ -66,3 +66,4 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   Also fixed: eager dependency collection made planning slow (Bunny 222 s -> 62 s); Z contouring now wins over
   non-planar with a warning. Windows build for testing: A:\forge\dl3.
   Next: order beads inside a shell low-to-high (teapot graze), sparse infill under shells, faster planner.
+- 2026-11-26 15:42 "launch slicer" (started A:\forge\dl3); 15:46 "how much of cores slicing is using?" (measured ~1 of 24); 15:47 "cant we optimize it to use all?"

@@ -1,5 +1,6 @@
 #include <chrono>
 #include <tbb/parallel_for.h>
+#include <tbb/parallel_sort.h>
 #include <tbb/blocked_range.h>
 #include <tbb/enumerable_thread_specific.h>
 #include "NonplanarSchedule.hpp"
@@ -142,6 +143,14 @@ public:
             }
     }
     int    index(double v) const { return int(std::floor(v / m_cell)); }
+    // Dense slots of the cells visit() would look at.
+    template<typename F> void visit_cells(double x, double y, double radius, F &&f) const {
+        const int ix0 = std::max(index(x - radius), m_x0), ix1 = std::min(index(x + radius), m_x0 + m_nx - 1);
+        const int iy0 = std::max(index(y - radius), m_y0), iy1 = std::min(index(y + radius), m_y0 + m_ny - 1);
+        for (int ix = ix0; ix <= ix1; ++ ix)
+            for (int iy = iy0; iy <= iy1; ++ iy)
+                f(slot(ix, iy));
+    }
     // Dense slot of cell (ix, iy), -1 outside.
     int    cell_slot(int ix, int iy) const {
         return ix < m_x0 || iy < m_y0 || ix >= m_x0 + m_nx || iy >= m_y0 + m_ny ? -1 : int(slot(ix, iy));
@@ -362,6 +371,44 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         box_x_min = std::min(box_x_min, b.x_min); box_x_max = std::max(box_x_max, b.x_max);
         box_y_min = std::min(box_y_min, b.y_min); box_y_max = std::max(box_y_max, b.y_max);
     }
+    // Forge: highest material within the reach of the toolhead boxes around
+    // each coarse cell (a dilated maximum).  A tool position whose lowest box
+    // underside lies above it cannot be obstructed by any box: its box search
+    // is skipped (exact, only removes work).
+    std::vector<double> coarse_near(coarse.cell_count(), -std::numeric_limits<double>::max());
+    {
+        const int wx = int(std::ceil((std::max(std::abs(box_x_min), std::abs(box_x_max)) + 0.5) / coarse_cell)) + 1;
+        const int wy = int(std::ceil((std::max(std::abs(box_y_min), std::abs(box_y_max)) + 0.5) / coarse_cell)) + 1;
+        const int nx = coarse.x1() - coarse.x0() + 1, ny = coarse.y1() - coarse.y0() + 1;
+        std::vector<double> base_z(size_t(nx) * size_t(ny), -std::numeric_limits<double>::max()), tmp(base_z.size(), -std::numeric_limits<double>::max());
+        auto at = [ny](int i, int j) { return size_t(i) * size_t(ny) + size_t(j); };
+        for (int i = 0; i < nx; ++ i)
+            for (int j = 0; j < ny; ++ j) {
+                const int k = coarse.cell_slot(coarse.x0() + i, coarse.y0() + j);
+                if (k >= 0 && coarse_used[size_t(k)])
+                    base_z[at(i, j)] = coarse_zmax[size_t(k)];
+            }
+        for (int i = 0; i < nx; ++ i)
+            for (int j = 0; j < ny; ++ j) {
+                double m = -std::numeric_limits<double>::max();
+                for (int d = std::max(0, j - wy); d <= std::min(ny - 1, j + wy); ++ d)
+                    m = std::max(m, base_z[at(i, d)]);
+                tmp[at(i, j)] = m;
+            }
+        for (int i = 0; i < nx; ++ i)
+            for (int j = 0; j < ny; ++ j) {
+                double m = -std::numeric_limits<double>::max();
+                for (int d = std::max(0, i - wx); d <= std::min(nx - 1, i + wx); ++ d)
+                    m = std::max(m, tmp[at(d, j)]);
+                const int k = coarse.cell_slot(coarse.x0() + i, coarse.y0() + j);
+                if (k >= 0)
+                    coarse_near[size_t(k)] = m;
+            }
+    }
+    auto near_zmax = [&](const Sample &s0) {
+        const int k = coarse_key(s0.x, s0.y);
+        return k < 0 ? zmax : coarse_near[size_t(k)];
+    };
     auto visit_boxes = [&](int t, auto &&f) {
         if (model.boxes.empty())
             return;
@@ -369,7 +416,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         double lowest_floor = std::numeric_limits<double>::max();
         for (const NonplanarClearanceModel::Box &b : model.boxes)
             lowest_floor = std::min(lowest_floor, s0.z + b.bottom - model.safety_mm);
-        if (zmax <= lowest_floor)
+        if (near_zmax(s0) <= lowest_floor)
             return;
         // Only cells that hold samples (the others are empty).
         for (double cx = std::max(std::floor((s0.x + box_x_min - 0.5) / coarse_cell), double(coarse.x0()));
@@ -476,6 +523,12 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
     // and a unit already collected is skipped as a whole.
     struct CellGroup { int unit; double zmax; int begin, end; };
     std::vector<std::vector<CellGroup>> cell_groups(coarse.cell_count());
+    // Forge: the same grouping on the fine grid (rings and tip): in every
+    // cell, the samples of one unit form a group with its highest sample, so
+    // a whole group is skipped when its unit cannot be a new dependent or
+    // when it lies too low.  Samples of a group by descending height.
+    std::vector<std::vector<CellGroup>> fine_groups(grid.cell_count());
+    std::vector<int> fine_samples;
     std::vector<int> cell_samples;
     // Units under the toolhead boxes at sample t that follow unit u (exact:
     // blocks() decides per sample; the rings are visited separately).
@@ -487,7 +540,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         double lowest_floor = std::numeric_limits<double>::max();
         for (const NonplanarClearanceModel::Box &b : model.boxes)
             lowest_floor = std::min(lowest_floor, s0.z + b.bottom - model.safety_mm);
-        if (zmax <= lowest_floor)
+        if (near_zmax(s0) <= lowest_floor)
             return;
         // Only cells that hold samples (the others are empty).
         for (double cx = std::max(std::floor((s0.x + box_x_min - 0.5) / coarse_cell), double(coarse.x0()));
@@ -538,7 +591,7 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
             double lowest_floor = std::numeric_limits<double>::max();
             for (const NonplanarClearanceModel::Box &b : model.boxes)
                 lowest_floor = std::min(lowest_floor, s0.z + b.bottom - model.safety_mm);
-            if (zmax > lowest_floor)
+            if (near_zmax(s0) > lowest_floor)
                 for (double cx = std::max(std::floor((s0.x + box_x_min - 0.5) / coarse_cell), double(coarse.x0()));
                      cx <= std::min(std::floor((s0.x + box_x_max + 0.5) / coarse_cell), double(coarse.x1())); cx += 1.)
                     for (double cy = std::max(std::floor((s0.y + box_y_min - 0.5) / coarse_cell), double(coarse.y0()));
@@ -658,12 +711,32 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
                 order.reserve(all.size());
                 for (size_t i = 0; i < all.size(); ++ i)
                     order.emplace_back(coarse_key(all[i].x, all[i].y), unit_of[i], - all[i].z, int(i));
-                std::sort(order.begin(), order.end());
+                tbb::parallel_sort(order.begin(), order.end());
                 cell_samples.resize(order.size());
                 for (size_t k = 0; k < order.size(); ++ k) {
                     cell_samples[k] = std::get<3>(order[k]);
                     const double z = all[size_t(cell_samples[k])].z;
                     std::vector<CellGroup> &groups = cell_groups[std::get<0>(order[k])];
+                    if (k > 0 && std::get<0>(order[k - 1]) == std::get<0>(order[k]) && std::get<1>(order[k - 1]) == std::get<1>(order[k])) {
+                        groups.back().zmax = std::max(groups.back().zmax, z);
+                        groups.back().end  = int(k) + 1;
+                    } else
+                        groups.push_back({ std::get<1>(order[k]), z, int(k), int(k) + 1 });
+                }
+            }
+            for (std::vector<CellGroup> &groups : fine_groups)
+                groups.clear();
+            {
+                std::vector<std::tuple<int, int, double, int>> order;
+                order.reserve(all.size());
+                for (size_t i = 0; i < all.size(); ++ i)
+                    order.emplace_back(grid.cell_slot(grid.index(all[i].x), grid.index(all[i].y)), unit_of[i], - all[i].z, int(i));
+                tbb::parallel_sort(order.begin(), order.end());
+                fine_samples.resize(order.size());
+                for (size_t k = 0; k < order.size(); ++ k) {
+                    fine_samples[k] = std::get<3>(order[k]);
+                    const double z = all[size_t(fine_samples[k])].z;
+                    std::vector<CellGroup> &groups = fine_groups[size_t(std::get<0>(order[k]))];
                     if (k > 0 && std::get<0>(order[k - 1]) == std::get<0>(order[k]) && std::get<1>(order[k - 1]) == std::get<1>(order[k])) {
                         groups.back().zmax = std::max(groups.back().zmax, z);
                         groups.back().end  = int(k) + 1;
@@ -705,15 +778,48 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         // tool at u's samples, and material resting on them.
         // Fresh: every unit; pending: only the changed units (the others are
         // carried over).  Exact: the same existence test as a fresh list.
-        auto collect_dependents = [&](int u, bool only_changed, std::vector<int> &out) {
+        auto collect_dependents = [&](int u, bool only_changed, std::vector<int> &out,
+                                      size_t first = 0, size_t last = std::numeric_limits<size_t>::max()) {
             // A unit found once is not tested again for further samples
             // (collected_for holds the collecting unit, reset per attempt).
             std::vector<int> &collected_for = collected();
-            for (int t : members[size_t(u)]) {
-                visit_followers(t,
-                    [&](int m) { const int v = unit_of[size_t(m)]; return v != u && collected_for[size_t(v)] != u && (! only_changed || changed[size_t(v)]); },
-                    [&](int m) { const int v = unit_of[size_t(m)]; if (collected_for[size_t(v)] != u) { collected_for[size_t(v)] = u; out.push_back(v); } },
-                    false);
+            const std::vector<int> &mem = members[size_t(u)];
+            last = std::min(last, mem.size());
+            for (size_t k = first; k < last; ++ k) {
+                const int t = mem[k];
+                const Sample &s0 = all[size_t(t)];
+                // Rings and tip: by unit groups (same result as visit_followers).
+                const double r = reach(t);
+                const double z_lo = s0.z + block_dz_min;
+                if (r > 0)
+                    grid.visit_cells(s0.x, s0.y, r, [&](size_t slot) {
+                        for (const CellGroup &g : fine_groups[slot]) {
+                            const int v = g.unit;
+                            if (v == u || collected_for[size_t(v)] == u || g.zmax <= z_lo || (only_changed && ! changed[size_t(v)]))
+                                continue;
+                            for (int q = g.begin; q < g.end; ++ q) {
+                                const int m = fine_samples[size_t(q)];
+                                if (all[size_t(m)].z <= z_lo)
+                                    break;
+                                if (blocks(all[size_t(m)], s0)) {
+                                    collected_for[size_t(v)] = u;
+                                    out.push_back(v);
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                // Material resting on t (stacked beads), as in visit_followers.
+                grid.visit_z(s0.x, s0.y, 2. * s0.half_width, s0.z + 0.1 - 1e-6, s0.z + 0.35 + 1e-6, z_of, [&](int r2) {
+                    const Sample &s1 = all[size_t(r2)];
+                    const int v = unit_of[size_t(r2)];
+                    if (v != u && collected_for[size_t(v)] != u && (! only_changed || changed[size_t(v)]) &&
+                        s1.z - s0.z > 0.1 && s1.z - s0.z < 0.35 &&
+                        std::hypot(s1.x - s0.x, s1.y - s0.y) < 0.5 * (s1.half_width + s0.half_width)) {
+                        collected_for[size_t(v)] = u;
+                        out.push_back(v);
+                    }
+                });
                 collect_box_dependents(t, u, out, only_changed ? &changed : nullptr);
             }
         };
@@ -838,28 +944,51 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
             }
         }
 
-        // Dependents of the conformal shells (where the propagation below starts),
-        // in parallel: each unit only reads shared data and writes its own list;
-        // scratch marks are per thread.  Other units stay lazy (dependents_of).
-        {
+        // Fresh dependents of many units at once, in parallel: each unit only
+        // reads shared data and writes its own sorted list; scratch marks are
+        // per thread.  Same lists as dependents_of() computes one by one.
+        auto collect_fresh_parallel = [&](const std::vector<int> &units) {
             std::vector<int> todo;
-            for (int u = 0; u < int(members.size()); ++ u)
-                if (! raw_known[size_t(u)] && i_is_conformal(members[size_t(u)].front()))
+            for (int u : units)
+                if (! raw_known[size_t(u)] && ! pending[size_t(u)])
                     todo.push_back(u);
-            tbb::parallel_for(tbb::blocked_range<size_t>(0, todo.size(), 8), [&](const tbb::blocked_range<size_t> &range) {
+            std::sort(todo.begin(), todo.end());
+            todo.erase(std::unique(todo.begin(), todo.end()), todo.end());
+            if (todo.empty())
+                return;
+            // Work items: chunks of the samples of each unit, so a few large
+            // shells still spread over all cores.  Marks are per thread and
+            // per chunk (reset with a fresh mark below), lists are merged.
+            constexpr size_t chunk = 2048;
+            struct Piece { int unit; size_t first, last; std::vector<int> found; };
+            std::vector<Piece> pieces;
+            for (int u : todo)
+                for (size_t f = 0; f < members[size_t(u)].size(); f += chunk)
+                    pieces.push_back({ u, f, std::min(f + chunk, members[size_t(u)].size()), {} });
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, pieces.size(), 1), [&](const tbb::blocked_range<size_t> &range) {
                 for (size_t k = range.begin(); k < range.end(); ++ k) {
                     throw_if_canceled();
-                    const int u = todo[k];
-                    collect_dependents(u, false, raw[size_t(u)]);
-                    std::sort(raw[size_t(u)].begin(), raw[size_t(u)].end());
+                    Piece &piece = pieces[k];
+                    // Another chunk of the same unit may have run on this thread:
+                    // clear its marks so this chunk reports every unit it finds.
+                    std::vector<int> &marks = collected();
+                    for (int &m : marks)
+                        if (m == piece.unit)
+                            m = -1;
+                    collect_dependents(piece.unit, false, piece.found, piece.first, piece.last);
                 }
             });
             for (int u : todo)
+                raw[size_t(u)].clear();
+            for (Piece &piece : pieces)
+                append(raw[size_t(piece.unit)], std::move(piece.found));
+            for (int u : todo) {
+                std::vector<int> &list = raw[size_t(u)];
+                std::sort(list.begin(), list.end());
+                list.erase(std::unique(list.begin(), list.end()), list.end());
                 raw_known[size_t(u)] = 1;
-            BOOST_LOG_TRIVIAL(info) << "Nonplanar deposition order: attempt " << attempt + 1 << ", " << members.size() << " units, "
-                << todo.size() << " dependent lists collected, " << all.size() << " samples ("
-                << first_conformal << " planar), " << std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_start).count() << " s";
-        }
+            }
+        };
         std::vector<int> parent(members.size(), -1);
         std::vector<int> worklist;
         std::vector<int> cycle;
@@ -868,17 +997,43 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         for (size_t u = 0; u < members.size(); ++ u)
             if (i_is_conformal(members[u].front()))
                 worklist.push_back(int(u));
+        collect_fresh_parallel(worklist);
+        static const bool progress_log = std::getenv("NONPLANAR_PLAN_PROGRESS") != nullptr;
+        if (progress_log)
+        BOOST_LOG_TRIVIAL(warning) << "Nonplanar deposition order: attempt " << attempt + 1 << ", " << members.size() << " units, "
+            << worklist.size() << " conformal, " << all.size() << " samples (" << first_conformal << " planar), "
+            << std::chrono::duration<double>(std::chrono::steady_clock::now() - plan_start).count() << " s";
         size_t visited = 0;
-        while (! worklist.empty() && cycle.empty()) {
+        // Forge: collect up to max_cycles disjoint cycles in one pass and
+        // refine them together (one cycle per attempt took hundreds of
+        // attempts, each rebuilding all units).  The last attempt still runs
+        // the full propagation without any cycle.
+        constexpr size_t max_cycles = 1000000;
+        std::vector<std::vector<int>> cycles;
+        std::vector<char> in_cycle(members.size(), 0);
+        // Top shells are never cut, so cycles may share them; only the units
+        // a refinement can change must be disjoint.
+        auto is_top_shell_unit = [&](int c) {
+            const ExtrusionPath &path = *sampled[size_t(all[size_t(members[size_t(c)].front())].path)].path;
+            return path.nonplanar_source && path.distance_to_top < 0.001f;
+        };
+        while (! worklist.empty() && cycles.size() < max_cycles) {
             if ((++ visited & 255) == 0)
                 throw_if_canceled();
+            // Before a unit whose dependents are not known yet, collect them
+            // for every unit waiting in the worklist at once (all cores).
+            if (! dependents_known[size_t(worklist.back())] && ! raw_known[size_t(worklist.back())])
+                collect_fresh_parallel(worklist);
             const int u = worklist.back();
             worklist.pop_back();
+            if (in_cycle[size_t(u)])
+                continue;
             for (int v : dependents_of(u)) {
-                if (unit_after(v, u))
+                if (unit_after(v, u) || in_cycle[size_t(v)])
                     continue;
                 // v must follow u.  If v already caused u (directly or not),
                 // the units form a cycle and cannot be ordered uncut.
+                cycle.clear();
                 for (int w = u, steps = 0; w != -1 && steps < 100000; w = parent[size_t(w)], ++ steps)
                     if (w == v) {
                         for (int c = u; c != v; c = parent[size_t(c)])
@@ -886,17 +1041,33 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
                         cycle.push_back(v);
                         break;
                     }
-                if (! cycle.empty())
+                if (! cycle.empty()) {
+                    bool overlaps = false;
+                    for (int c : cycle)
+                        overlaps |= in_cycle[size_t(c)] != 0;
+                    if (! overlaps) {
+                        for (int c : cycle)
+                            if (! is_top_shell_unit(c))
+                                in_cycle[size_t(c)] = 1;
+                        cycles.push_back(cycle);
+                    }
+                    cycle.clear();
                     break;
+                }
                 unit_slot[size_t(v)] = slot_after(u, v);
                 parent[size_t(v)] = u;
                 worklist.push_back(v);
             }
         }
-        if (cycle.empty())
+        if (cycles.empty())
             break;
+        cycle = cycles.front();
+        static const bool progress_log2 = std::getenv("NONPLANAR_PLAN_PROGRESS") != nullptr;
+        if (progress_log2)
+            BOOST_LOG_TRIVIAL(warning) << "Nonplanar deposition order: attempt " << attempt + 1 << ": " << cycles.size() << " cycles";
         if (! banded) {
             bool lower_shell = false;
+            for (const std::vector<int> &cycle : cycles)
             for (int c : cycle) {
                 const ExtrusionPath &path = *sampled[size_t(all[size_t(members[size_t(c)].front())].path)].path;
                 lower_shell |= path.nonplanar_source && path.distance_to_top > 0.001f;
@@ -915,7 +1086,8 @@ NonplanarDeferral plan_nonplanar_deferral(const PrintObject &object, const Nonpl
         // A cycle that cannot be refined (top shell and single chunks only)
         // has no admissible order without cutting the top shell.
         bool progress = false;
-        // Refine the edges of the planar and lower-shell units of the cycle.
+        // Refine the edges of the planar and lower-shell units of the cycles.
+        for (const std::vector<int> &cycle : cycles)
         for (size_t k = 0; k < cycle.size(); ++ k) {
             throw_if_canceled();
             const int c = cycle[k];
