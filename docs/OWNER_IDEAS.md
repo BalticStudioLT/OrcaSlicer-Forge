@@ -67,3 +67,6 @@ Running log of every idea and request for OrcaSlicer Forge, newest last. Times a
   non-planar with a warning. Windows build for testing: A:\forge\dl3.
   Next: order beads inside a shell low-to-high (teapot graze), sparse infill under shells, faster planner.
 - 2026-11-26 15:42 "launch slicer" (started A:\forge\dl3); 15:46 "how much of cores slicing is using?" (measured ~1 of 24); 15:47 "cant we optimize it to use all?"
+- 2026-11-26 19:01 "I dont care about slice time. I want it sliced. Can you already do it?"
+- 2026-11-26 19:28 "Slice it and show previews here and toolhead timelapse"
+  Done: Dezute (5) and the medallion holder both sliced non-planar with no time limit (medallion 15 min on 2 cores, 285 passes), G-code check 0 collisions each; toolhead animations + previews sent. Launcher without limit: A:\forge\OrcaSlicer Forge (no planning time limit).cmd
